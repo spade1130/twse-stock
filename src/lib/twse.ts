@@ -73,16 +73,63 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const TAIPEI_TIMEZONE = "Asia/Taipei";
+const WEEKDAY_MAP: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
+
+interface TaipeiDateTime {
+  year: number;
+  month: number;
+  day: number;
+  hours: number;
+  minutes: number;
+  weekday: number;
+}
+
+function getTaipeiDateTime(d = new Date()): TaipeiDateTime {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TAIPEI_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+    hourCycle: "h23",
+  }).formatToParts(d);
+
+  const getPart = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  const weekdayLabel = getPart("weekday");
+
+  return {
+    year: parseInt(getPart("year"), 10),
+    month: parseInt(getPart("month"), 10),
+    day: parseInt(getPart("day"), 10),
+    hours: parseInt(getPart("hour"), 10),
+    minutes: parseInt(getPart("minute"), 10),
+    weekday: WEEKDAY_MAP[weekdayLabel] ?? -1,
+  };
+}
+
 function rocDate(d = new Date()): string {
-  const rocYear = d.getFullYear() - 1911;
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  const taipeiNow = getTaipeiDateTime(d);
+  const rocYear = taipeiNow.year - 1911;
+  const month = String(taipeiNow.month).padStart(2, "0");
+  const day = String(taipeiNow.day).padStart(2, "0");
   return `${rocYear}${month}${day}`;
 }
 
 function previousRocDate(d = new Date()): string {
-  const prev = new Date(d);
-  prev.setDate(prev.getDate() - 1);
+  const prev = new Date(d.getTime() - 24 * 60 * 60 * 1000);
   return rocDate(prev);
 }
 
@@ -254,9 +301,10 @@ export async function getYesterdayVolumes(): Promise<Map<string, number>> {
 }
 
 function formatTpexDate(d = new Date()): string {
-  const rocYear = d.getFullYear() - 1911;
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  const taipeiNow = getTaipeiDateTime(d);
+  const rocYear = taipeiNow.year - 1911;
+  const month = String(taipeiNow.month).padStart(2, "0");
+  const day = String(taipeiNow.day).padStart(2, "0");
   return `${rocYear}/${month}/${day}`;
 }
 
@@ -491,12 +539,11 @@ export async function fetchStockQuotes(
 }
 
 export function getMarketStatus(): "open" | "closed" | "unknown" {
-  const now = new Date();
-  const day = now.getDay();
+  const taipeiNow = getTaipeiDateTime();
+  const day = taipeiNow.weekday;
   if (day === 0 || day === 6) return "closed";
 
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
+  const { hours, minutes } = taipeiNow;
   const time = hours * 60 + minutes;
 
   const morningOpen = 9 * 60;

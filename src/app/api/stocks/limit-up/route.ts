@@ -5,13 +5,22 @@ import {
   searchStocks,
 } from "@/lib/analyzer";
 import {
-  fetchDailyQuotes,
+  fetchLatestQuotes,
   getInstitutionalData,
   getMarketStatus,
+  getYesterdayVolumes,
 } from "@/lib/twse";
 import type { LimitUpResponse } from "@/types/stock";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
+function formatTradeDate(raw: string): string {
+  if (/^\d{8}$/.test(raw)) {
+    return `${raw.slice(0, 4)}/${raw.slice(4, 6)}/${raw.slice(6, 8)}`;
+  }
+  return raw;
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
@@ -19,13 +28,18 @@ export async function GET(request: NextRequest) {
   const minScore = parseInt(searchParams.get("minScore") ?? "0", 10);
 
   try {
-    const [quotes, institutional] = await Promise.all([
-      fetchDailyQuotes(),
+    const [latest, volumes, institutional] = await Promise.all([
+      fetchLatestQuotes(),
+      getYesterdayVolumes(),
       getInstitutionalData(),
     ]);
 
-    const analyzed = quotes.map((stock) =>
-      analyzeMainForce(stock, 0, institutional.get(stock.code)),
+    const analyzed = latest.stocks.map((stock) =>
+      analyzeMainForce(
+        stock,
+        volumes.get(stock.code) ?? 0,
+        institutional.get(stock.code),
+      ),
     );
 
     const allLimitUp = analyzed.filter((s) => s.isLimitUp);
@@ -34,13 +48,19 @@ export async function GET(request: NextRequest) {
 
     const response: LimitUpResponse = {
       updatedAt: new Date().toISOString(),
+      tradeDate: formatTradeDate(latest.tradeDate),
+      dataSource: latest.dataSource,
       marketStatus: getMarketStatus(),
       totalScanned: analyzed.length,
       limitUpCount: allLimitUp.length,
       stocks,
     };
 
-    return NextResponse.json(response);
+    return NextResponse.json(response, {
+      headers: {
+        "Cache-Control": "no-store, max-age=0",
+      },
+    });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "資料取得失敗";

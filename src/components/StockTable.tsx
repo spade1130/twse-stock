@@ -283,7 +283,8 @@ export function StockTable({ stocks, loading, hasSearched }: StockTableProps) {
       <div className="flex h-64 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900/40">
         <div className="text-center">
           <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-red-500 border-t-transparent" />
-          <p className="mt-3 text-sm text-zinc-500">正在篩選漲停股...</p>
+          <p className="mt-3 text-sm text-zinc-500">正在取得最新即時報價並篩選...</p>
+          <p className="mt-1 text-xs text-zinc-600">全市場掃描約需 20–40 秒</p>
         </div>
       </div>
     );

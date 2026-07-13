@@ -6,6 +6,8 @@ interface StatsCardsProps {
   filteredCount: number;
   marketStatus: "open" | "closed" | "unknown";
   updatedAt: string;
+  tradeDate?: string;
+  dataSource?: "realtime" | "daily";
   loading: boolean;
 }
 
@@ -27,13 +29,24 @@ export function StatsCards({
   filteredCount,
   marketStatus,
   updatedAt,
+  tradeDate,
+  dataSource,
   loading,
 }: StatsCardsProps) {
   const time = updatedAt
     ? new Date(updatedAt).toLocaleTimeString("zh-TW")
     : "--";
 
+  const sourceLabel =
+    dataSource === "realtime"
+      ? "即時報價"
+      : dataSource === "daily"
+        ? "收盤資料"
+        : "--";
+
   const cards = [
+    { label: "交易日", value: tradeDate || "--" },
+    { label: "資料來源", value: sourceLabel },
     { label: "掃描標的", value: totalScanned.toLocaleString() },
     { label: "漲停股數", value: limitUpCount.toLocaleString(), accent: true },
     { label: "篩選結果", value: filteredCount.toLocaleString(), accent: true },
@@ -46,7 +59,7 @@ export function StatsCards({
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
       {cards.map((card) => (
         <div
           key={card.label}

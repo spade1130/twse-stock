@@ -42,6 +42,8 @@ export interface LimitUpStock extends StockInfo {
 
 export interface LimitUpResponse {
   updatedAt: string;
+  tradeDate: string;
+  dataSource: "realtime" | "daily";
   marketStatus: "open" | "closed" | "unknown";
   totalScanned: number;
   limitUpCount: number;

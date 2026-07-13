@@ -23,7 +23,9 @@ export default function Home() {
       });
       if (search) params.set("q", search);
 
-      const res = await fetch(`/api/stocks/limit-up?${params}`);
+      const res = await fetch(`/api/stocks/limit-up?${params}`, {
+        cache: "no-store",
+      });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error ?? "資料載入失敗");
@@ -65,7 +67,7 @@ export default function Home() {
                 台股漲停股篩選
               </h1>
               <p className="text-sm text-zinc-500">
-                主力大量購入漲停股篩選器 · 資料來源：證交所公開 API
+                主力大量購入漲停股篩選器 · 點擊篩選時取得最新即時報價
               </p>
             </div>
           </div>
@@ -79,6 +81,8 @@ export default function Home() {
               filteredCount={data?.stocks.length ?? 0}
               marketStatus={data?.marketStatus ?? "unknown"}
               updatedAt={data?.updatedAt ?? ""}
+              tradeDate={data?.tradeDate}
+              dataSource={data?.dataSource}
               loading={loading}
             />
           )}
@@ -106,9 +110,12 @@ export default function Home() {
         />
 
         <footer className="mt-8 text-center text-xs text-zinc-600">
-          <p>主力分數綜合評估：法人買超、量能、漲停型態（資料為當日收盤）</p>
+          <p>
+            行情來自證交所 MIS 即時報價（手動篩選時更新）·
+            主力分數綜合評估法人、量能與五檔委託
+          </p>
           <p className="mt-1">
-            法人資料為前一交易日三大法人買賣超 · 僅供參考，不構成投資建議
+            法人資料為最近可得之三大法人買賣超 · 僅供參考，不構成投資建議
           </p>
         </footer>
       </div>

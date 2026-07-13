@@ -34,8 +34,14 @@ let stockListCache: { data: StockCodeEntry[]; fetchedAt: number } | null = null;
 let institutionalCache: {
   data: Map<string, InstitutionalData>;
   date: string;
+  fetchedAt: number;
 } | null = null;
-let yesterdayVolumeCache: Map<string, number> | null = null;
+let yesterdayVolumeCache: {
+  data: Map<string, number>;
+  fetchedAt: number;
+} | null = null;
+
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 function parseNum(value?: string): number {
   if (!value || value === "-" || value === "") return 0;
@@ -140,7 +146,7 @@ async function fetchJson<T>(url: string, referer?: string): Promise<T | null> {
         "User-Agent": USER_AGENT,
         Referer: referer ?? "https://mis.twse.com.tw/",
       },
-      next: { revalidate: 0 },
+      cache: "no-store",
     });
     if (!res.ok) return null;
     return (await res.json()) as T;
@@ -156,7 +162,7 @@ async function fetchText(url: string): Promise<string | null> {
         "User-Agent": USER_AGENT,
         Referer: "https://www.twse.com.tw/",
       },
-      next: { revalidate: 0 },
+      cache: "no-store",
     });
     if (!res.ok) return null;
     return await res.text();
@@ -208,6 +214,8 @@ function parseStockMsg(msg: RawStockMsg): StockInfo | null {
   const change = yesterdayClose > 0 ? price - yesterdayClose : 0;
   const changePercent =
     yesterdayClose > 0 ? (change / yesterdayClose) * 100 : 0;
+  // MIS 累積成交量單位為「張」，轉成股數以便與收盤資料比較
+  const volumeLots = parseInt(msg.v ?? "0", 10) || 0;
 
   return {
     code,
@@ -222,7 +230,7 @@ function parseStockMsg(msg: RawStockMsg): StockInfo | null {
     limitDown: parseNum(msg.w),
     change,
     changePercent,
-    volume: parseInt(msg.v ?? "0", 10) || 0,
+    volume: volumeLots * 1000,
     buyVolumes: parseVolumes(msg.g),
     sellVolumes: parseVolumes(msg.f),
     buyPrices: parsePrices(msg.b),
@@ -271,7 +279,13 @@ export async function getStockList(): Promise<StockCodeEntry[]> {
 }
 
 export async function getYesterdayVolumes(): Promise<Map<string, number>> {
-  if (yesterdayVolumeCache) return yesterdayVolumeCache;
+  const now = Date.now();
+  if (
+    yesterdayVolumeCache &&
+    now - yesterdayVolumeCache.fetchedAt < CACHE_TTL_MS
+  ) {
+    return yesterdayVolumeCache.data;
+  }
 
   const volumes = new Map<string, number>();
 
@@ -296,7 +310,7 @@ export async function getYesterdayVolumes(): Promise<Map<string, number>> {
     }
   }
 
-  yesterdayVolumeCache = volumes;
+  yesterdayVolumeCache = { data: volumes, fetchedAt: now };
   return volumes;
 }
 
@@ -374,7 +388,11 @@ export async function getInstitutionalData(): Promise<
   Map<string, InstitutionalData>
 > {
   const today = rocDate();
-  if (institutionalCache?.date === today) {
+  const now = Date.now();
+  if (
+    institutionalCache?.date === today &&
+    now - institutionalCache.fetchedAt < CACHE_TTL_MS
+  ) {
     return institutionalCache.data;
   }
 
@@ -386,8 +404,7 @@ export async function getInstitutionalData(): Promise<
   } else {
     const fallbackDates = [previousRocDate()];
     for (let i = 0; i < 3; i++) {
-      const d = new Date();
-      d.setDate(d.getDate() - (i + 2));
+      const d = new Date(Date.now() - (i + 2) * 24 * 60 * 60 * 1000);
       fallbackDates.push(rocDate(d));
     }
     for (const date of [...new Set(fallbackDates)]) {
@@ -403,13 +420,12 @@ export async function getInstitutionalData(): Promise<
   if (otcToday.length > 0) {
     for (const row of otcToday) data.set(row.code, row);
   } else {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const otcRows = await fetchOtcInstitutional(formatTpexDate(yesterday));
     for (const row of otcRows) data.set(row.code, row);
   }
 
-  institutionalCache = { data, date: today };
+  institutionalCache = { data, date: today, fetchedAt: now };
   return data;
 }
 
@@ -429,6 +445,55 @@ async function fetchStockBatch(
   return res.msgArray
     .map(parseStockMsg)
     .filter((s): s is StockInfo => s !== null);
+}
+
+export async function fetchLatestQuotes(): Promise<{
+  stocks: StockInfo[];
+  tradeDate: string;
+  dataSource: "realtime" | "daily";
+}> {
+  const list = await getStockList();
+  if (list.length === 0) {
+    const daily = await fetchDailyQuotes();
+    return {
+      stocks: daily,
+      tradeDate: rocDate(),
+      dataSource: "daily",
+    };
+  }
+
+  const batches = chunk(list, 80);
+  const results: StockInfo[] = [];
+  let tradeDate = rocDate();
+
+  for (const batch of batches) {
+    const quotes = await fetchStockBatch(batch);
+    results.push(...quotes);
+    await delay(250);
+  }
+
+  // 若即時報價幾乎沒取到，退回收盤資料
+  if (results.length < Math.min(50, list.length / 10)) {
+    const daily = await fetchDailyQuotes();
+    return {
+      stocks: daily,
+      tradeDate: rocDate(),
+      dataSource: "daily",
+    };
+  }
+
+  const probe = await fetchJson<{
+    msgArray?: { d?: string }[];
+  }>(`${MIS_BASE}?ex_ch=tse_2330.tw&json=1&delay=0&_=${Date.now()}`);
+  if (probe?.msgArray?.[0]?.d) {
+    tradeDate = probe.msgArray[0].d;
+  }
+
+  return {
+    stocks: results,
+    tradeDate,
+    dataSource: "realtime",
+  };
 }
 
 export async function fetchDailyQuotes(): Promise<StockInfo[]> {

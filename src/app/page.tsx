@@ -55,9 +55,12 @@ export default function Home() {
     try {
       const params = new URLSearchParams();
       if (search) params.set("q", search);
+      // Bust any intermediate/browser caches so each screening gets fresh quotes.
+      params.set("_t", String(Date.now()));
 
       const res = await fetch(`/api/stocks/potential?${params.toString()}`, {
         cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
       });
 
       if (!res.ok) {

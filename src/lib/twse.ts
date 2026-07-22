@@ -203,6 +203,21 @@ async function fetchTwseDayAll(): Promise<string[][]> {
   return parseTwseCsv(text);
 }
 
+function resolveLatestPrice(msg: RawStockMsg, yesterdayClose: number): number {
+  // Prefer last deal price. When MIS returns "-" (no tick in snapshot),
+  // fall back to best bid/ask — never day high, which would freeze the quote.
+  const lastDeal = parseNum(msg.z);
+  if (lastDeal > 0) return lastDeal;
+
+  const bid = parsePrices(msg.b)[0] ?? 0;
+  const ask = parsePrices(msg.a)[0] ?? 0;
+  if (bid > 0 && ask > 0) return (bid + ask) / 2;
+  if (bid > 0) return bid;
+  if (ask > 0) return ask;
+
+  return yesterdayClose > 0 ? yesterdayClose : 0;
+}
+
 function parseStockMsg(msg: RawStockMsg): StockInfo | null {
   const code = msg.c;
   const market = msg.ex as Market;
@@ -210,7 +225,7 @@ function parseStockMsg(msg: RawStockMsg): StockInfo | null {
   if (!/^\d{4,6}$/.test(code)) return null;
 
   const yesterdayClose = parseNum(msg.y);
-  const price = parseNum(msg.z) || parseNum(msg.h) || yesterdayClose;
+  const price = resolveLatestPrice(msg, yesterdayClose);
   const change = yesterdayClose > 0 ? price - yesterdayClose : 0;
   const changePercent =
     yesterdayClose > 0 ? (change / yesterdayClose) * 100 : 0;

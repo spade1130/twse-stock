@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   fetchLatestQuotes,
+  fetchStockQuotes,
   getMarketStatus,
 } from "@/lib/twse";
 import { fetchStockHistory } from "@/lib/stock-history";
@@ -182,6 +183,28 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Re-fetch fresh quotes for candidates after the slow TDCC phase,
+    // so displayed prices reflect the latest market tick on each screening.
+    const freshQuotes = await fetchStockQuotes(
+      candidates.map((s) => ({ code: s.code, market: s.market })),
+    );
+    const freshByCode = new Map(freshQuotes.map((s) => [s.code, s]));
+    candidates = candidates.map((s) => {
+      const fresh = freshByCode.get(s.code);
+      if (!fresh || fresh.price <= 0) return s;
+      return {
+        ...s,
+        price: fresh.price,
+        open: fresh.open || s.open,
+        high: fresh.high || s.high,
+        low: fresh.low || s.low,
+        volume: fresh.volume || s.volume,
+        change: fresh.change,
+        changePercent: fresh.changePercent,
+        updateTime: fresh.updateTime,
+      };
+    });
+
     const stocks = (
       await mapLimit(candidates, 6, async (stock): Promise<PotentialStock | null> => {
         const history = await fetchStockHistory(stock.code, stock.market, 4);
@@ -243,6 +266,26 @@ export async function GET(request: NextRequest) {
     const results = fullMatches.length > 0 ? fullMatches : partialMatches;
     const matchMode = fullMatches.length > 0 ? "full" : "partial";
 
+    // Final price refresh for returned stocks so the UI shows the latest tick.
+    if (results.length > 0) {
+      const latestQuotes = await fetchStockQuotes(
+        results.map((s) => ({ code: s.code, market: s.market })),
+      );
+      const quoteMap = new Map(latestQuotes.map((s) => [s.code, s]));
+      for (const stock of results) {
+        const quote = quoteMap.get(stock.code);
+        if (!quote || quote.price <= 0) continue;
+        stock.price = quote.price;
+        stock.open = quote.open || stock.open;
+        stock.high = quote.high || stock.high;
+        stock.low = quote.low || stock.low;
+        stock.volume = quote.volume || stock.volume;
+        stock.change = quote.change;
+        stock.changePercent = quote.changePercent;
+        stock.updateTime = quote.updateTime;
+      }
+    }
+
     const response: PotentialResponse = {
       updatedAt: new Date().toISOString(),
       tradeDate: formatTradeDateISO(latest.tradeDate),
@@ -256,7 +299,11 @@ export async function GET(request: NextRequest) {
     };
 
     return NextResponse.json(response, {
-      headers: { "Cache-Control": "no-store, max-age=0" },
+      headers: {
+        "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "資料取得失敗";

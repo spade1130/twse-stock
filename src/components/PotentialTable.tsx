@@ -280,6 +280,101 @@ function ConditionPill({ passed }: { passed: boolean }) {
   );
 }
 
+function ConditionItem({
+  condition,
+}: {
+  condition: PotentialStock["conditions"][number];
+}) {
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [coords, setCoords] = useState({
+    x: 0,
+    y: 0,
+    placement: "bottom" as "top" | "bottom",
+  });
+
+  const updatePosition = useCallback(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const estimatedHeight = 80;
+    const gap = 8;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const preferBelow =
+      spaceBelow >= estimatedHeight + gap || spaceBelow >= spaceAbove;
+
+    if (preferBelow) {
+      setCoords({ x: centerX, y: rect.bottom + gap, placement: "bottom" });
+    } else {
+      setCoords({ x: centerX, y: rect.top - gap, placement: "top" });
+    }
+  }, []);
+
+  const show = useCallback(() => {
+    updatePosition();
+    setVisible(true);
+  }, [updatePosition]);
+
+  const hide = useCallback(() => setVisible(false), []);
+
+  useEffect(() => {
+    if (!visible) return;
+
+    const handleReposition = () => updatePosition();
+    window.addEventListener("scroll", handleReposition, true);
+    window.addEventListener("resize", handleReposition);
+
+    return () => {
+      window.removeEventListener("scroll", handleReposition, true);
+      window.removeEventListener("resize", handleReposition);
+    };
+  }, [visible, updatePosition]);
+
+  const tooltip =
+    visible &&
+    createPortal(
+      <div
+        role="tooltip"
+        style={{
+          position: "fixed",
+          left: coords.x,
+          top: coords.y,
+          transform:
+            coords.placement === "bottom"
+              ? "translateX(-50%)"
+              : "translate(-50%, -100%)",
+        }}
+        className="z-[200] max-w-xs rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-left shadow-xl"
+        onMouseEnter={show}
+        onMouseLeave={hide}
+      >
+        <p className="text-xs font-medium text-zinc-200">{condition.label}</p>
+        <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+          {condition.detail}
+        </p>
+      </div>,
+      document.body,
+    );
+
+  return (
+    <>
+      <div
+        ref={triggerRef}
+        className="flex cursor-help items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2 py-1"
+        onMouseEnter={show}
+        onMouseLeave={hide}
+      >
+        <ConditionPill passed={condition.passed} />
+        <span className="text-[11px] text-zinc-400">{condition.label}</span>
+      </div>
+      {tooltip}
+    </>
+  );
+}
+
 export function PotentialTable({
   stocks,
   loading,
@@ -372,10 +467,7 @@ export function PotentialTable({
                 <td className="px-4 py-3">
                   <div className="flex flex-wrap gap-2">
                     {s.conditions.slice(0, 7).map((c) => (
-                      <div key={c.id} className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2 py-1">
-                        <ConditionPill passed={c.passed} />
-                        <span className="text-[11px] text-zinc-400">{c.label}</span>
-                      </div>
+                      <ConditionItem key={c.id} condition={c} />
                     ))}
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1">

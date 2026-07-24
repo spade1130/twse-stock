@@ -320,12 +320,11 @@ export function PotentialTable({
     <div className="rounded-xl border border-zinc-800">
       <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/80 px-4 py-2.5">
         <p className="text-sm text-zinc-400">
-          共 <span className="font-medium text-zinc-200">{stocks.length}</span> 檔
-          {isPartial ? "接近符合（至少 5/7 項）" : "符合全部條件"}
+          共 <span className="font-medium text-zinc-200">{stocks.length}</span> 檔符合匹配分數條件
         </p>
         {isPartial && (
           <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
-            今日無 7/7 完全符合
+            依匹配分數排序（含未全過 7 項）
           </span>
         )}
       </div>

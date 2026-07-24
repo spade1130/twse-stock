@@ -1,12 +1,12 @@
 "use client";
 
-import React from "react";
-
 interface PotentialSearchBarProps {
   value: string;
   onChange: (value: string) => void;
   onSearch: () => void;
   loading: boolean;
+  minScore: number;
+  onMinScoreChange: (score: number) => void;
   placeholder?: string;
 }
 
@@ -15,6 +15,8 @@ export function PotentialSearchBar({
   onChange,
   onSearch,
   loading,
+  minScore,
+  onMinScoreChange,
   placeholder = "搜尋股票代號或名稱...",
 }: PotentialSearchBarProps) {
   return (
@@ -42,11 +44,29 @@ export function PotentialSearchBar({
         />
       </div>
 
-      <div>
+      <div className="flex items-center gap-3">
+        <label className="flex items-center gap-2 text-sm text-zinc-400">
+          匹配分數 ≥
+          <select
+            value={minScore}
+            onChange={(e) => onMinScoreChange(Number(e.target.value))}
+            className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-200 focus:outline-none"
+          >
+            <option value={0}>不限</option>
+            <option value={20}>20</option>
+            <option value={30}>30</option>
+            <option value={40}>40</option>
+            <option value={50}>50</option>
+            <option value={60}>60</option>
+            <option value={70}>70</option>
+            <option value={80}>80</option>
+          </select>
+        </label>
+
         <button
           onClick={onSearch}
           disabled={loading}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-red-500 disabled:opacity-50 sm:w-auto"
+          className="flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-red-500 disabled:opacity-50"
         >
           <svg
             className={`h-4 w-4 ${loading ? "animate-spin" : ""}`}
@@ -67,4 +87,3 @@ export function PotentialSearchBar({
     </div>
   );
 }
-

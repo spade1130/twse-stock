@@ -19,6 +19,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [minScore, setMinScore] = useState(0);
+  const [potentialMinScore, setPotentialMinScore] = useState(0);
   const [limitHasSearched, setLimitHasSearched] = useState(false);
   const [potentialHasSearched, setPotentialHasSearched] = useState(false);
 
@@ -53,10 +54,11 @@ export default function Home() {
     setError(null);
 
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({
+        minScore: String(potentialMinScore),
+        _t: String(Date.now()),
+      });
       if (search) params.set("q", search);
-      // Bust any intermediate/browser caches so each screening gets fresh quotes.
-      params.set("_t", String(Date.now()));
 
       const res = await fetch(`/api/stocks/potential?${params.toString()}`, {
         cache: "no-store",
@@ -76,7 +78,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, [search, potentialMinScore]);
 
   return (
     <main className="min-h-screen bg-zinc-950">
@@ -175,6 +177,8 @@ export default function Home() {
               onChange={setSearch}
               onSearch={fetchPotential}
               loading={loading}
+              minScore={potentialMinScore}
+              onMinScoreChange={setPotentialMinScore}
             />
           )}
         </div>

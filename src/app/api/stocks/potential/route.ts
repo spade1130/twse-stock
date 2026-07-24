@@ -12,17 +12,18 @@ import {
 } from "@/lib/margin-data";
 import { fetchTdccChipMetricsForCodesWithComparison } from "@/lib/tdcc-data";
 import { analyzePotentialStock } from "@/lib/potential-analyzer";
-import type { PotentialResponse, PotentialStock } from "@/types/stock";
+import type { PotentialResponse, PotentialStock, StockInfo } from "@/types/stock";
 import type { DailyBar } from "@/lib/stock-history";
-import type { StockInfo } from "@/types/stock";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-const MAX_HISTORY_CANDIDATES = 60;
+const MAX_HISTORY_CANDIDATES = 120;
 const MIN_HISTORY_BARS = 60;
-const MARGIN_CANDIDATE_POOL = 60;
-const MIN_PARTIAL_MATCHES = 5;
+const MARGIN_CANDIDATE_POOL = 100;
+const CHIP_CANDIDATE_POOL = 80;
+const VOLUME_FALLBACK_POOL = 40;
+const DEFAULT_MIN_SCORE = 0;
 
 function formatTradeDateISO(raw: string): string {
   if (/^\d{8}$/.test(raw)) {
@@ -63,6 +64,12 @@ function scorePreconditions(
   }
   if (chip && chipPrev && chip.majorHolderPct - chipPrev.majorHolderPct >= 3) {
     score += 3;
+  } else if (
+    chip &&
+    chipPrev &&
+    chip.majorHolderPct - chipPrev.majorHolderPct > 0
+  ) {
+    score += 1;
   }
 
   const marginCurrent = margins.current.get(stock.code) ?? 0;
@@ -81,16 +88,32 @@ function buildCandidates(
 ): StockInfo[] {
   const candidateMap = new Map<string, StockInfo>();
 
-  for (const stock of validStocks) {
-    const chip = tdcc.latest.get(stock.code);
-    const chipPrev = tdcc.previous.get(stock.code);
-    if (!chip || !chipPrev) continue;
+  // Chip concentration up and/or major holder increasing.
+  const chipQualified = validStocks
+    .filter((stock) => {
+      const chip = tdcc.latest.get(stock.code);
+      const chipPrev = tdcc.previous.get(stock.code);
+      if (!chip || !chipPrev) return false;
+      const chipUp = chip.chipConcentration > chipPrev.chipConcentration;
+      const majorUp = chip.majorHolderPct > chipPrev.majorHolderPct;
+      return chipUp || majorUp;
+    })
+    .sort((a, b) => {
+      const aChip = tdcc.latest.get(a.code);
+      const aPrev = tdcc.previous.get(a.code);
+      const bChip = tdcc.latest.get(b.code);
+      const bPrev = tdcc.previous.get(b.code);
+      const aDelta =
+        (aChip?.majorHolderPct ?? 0) - (aPrev?.majorHolderPct ?? 0);
+      const bDelta =
+        (bChip?.majorHolderPct ?? 0) - (bPrev?.majorHolderPct ?? 0);
+      if (bDelta !== aDelta) return bDelta - aDelta;
+      return b.volume - a.volume;
+    })
+    .slice(0, CHIP_CANDIDATE_POOL);
 
-    const chipChange = chip.chipConcentration - chipPrev.chipConcentration;
-    const majorChange = chip.majorHolderPct - chipPrev.majorHolderPct;
-    if (chipChange > 0 && majorChange >= 3) {
-      candidateMap.set(stock.code, stock);
-    }
+  for (const stock of chipQualified) {
+    candidateMap.set(stock.code, stock);
   }
 
   const marginStocks = validStocks
@@ -106,6 +129,15 @@ function buildCandidates(
 
   for (const stock of marginStocks) {
     candidateMap.set(stock.code, stock);
+  }
+
+  // Volume fallback so the pool stays large enough on quiet chip/margin days.
+  if (candidateMap.size < MAX_HISTORY_CANDIDATES) {
+    const byVolume = [...validStocks].sort((a, b) => b.volume - a.volume);
+    for (const stock of byVolume.slice(0, VOLUME_FALLBACK_POOL)) {
+      candidateMap.set(stock.code, stock);
+      if (candidateMap.size >= MAX_HISTORY_CANDIDATES) break;
+    }
   }
 
   return Array.from(candidateMap.values())
@@ -140,20 +172,20 @@ async function mapLimit<T, R>(
   return results;
 }
 
-function passedCount(stock: PotentialStock): number {
-  return stock.conditions.filter((c) => c.passed).length;
-}
-
-function sortByMatchQuality(a: PotentialStock, b: PotentialStock): number {
-  const aPassed = passedCount(a);
-  const bPassed = passedCount(b);
-  if (bPassed !== aPassed) return bPassed - aPassed;
-  return b.matchScore - a.matchScore;
+function sortByMatchScore(a: PotentialStock, b: PotentialStock): number {
+  if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+  const aPassed = a.conditions.filter((c) => c.passed).length;
+  const bPassed = b.conditions.filter((c) => c.passed).length;
+  return bPassed - aPassed;
 }
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const q = (searchParams.get("q") ?? "").trim().toLowerCase();
+  const minScoreRaw = parseInt(searchParams.get("minScore") ?? "", 10);
+  const minScore = Number.isFinite(minScoreRaw)
+    ? Math.max(0, minScoreRaw)
+    : DEFAULT_MIN_SCORE;
 
   try {
     const [latest, margins] = await Promise.all([
@@ -183,8 +215,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Re-fetch fresh quotes for candidates after the slow TDCC phase,
-    // so displayed prices reflect the latest market tick on each screening.
+    // Re-fetch fresh quotes for candidates after the slow TDCC phase.
     const freshQuotes = await fetchStockQuotes(
       candidates.map((s) => ({ code: s.code, market: s.market })),
     );
@@ -206,7 +237,7 @@ export async function GET(request: NextRequest) {
     });
 
     const stocks = (
-      await mapLimit(candidates, 6, async (stock): Promise<PotentialStock | null> => {
+      await mapLimit(candidates, 8, async (stock): Promise<PotentialStock | null> => {
         const history = await fetchStockHistory(stock.code, stock.market, 4);
         if (history.length < MIN_HISTORY_BARS) return null;
 
@@ -255,18 +286,15 @@ export async function GET(request: NextRequest) {
       })
     ).filter((s): s is PotentialStock => s !== null);
 
-    const fullMatches = stocks
-      .filter((s) => s.conditions.every((c) => c.passed))
-      .sort(sortByMatchQuality);
+    const results = stocks
+      .filter((s) => s.matchScore >= minScore)
+      .sort(sortByMatchScore);
 
-    const partialMatches = stocks
-      .filter((s) => passedCount(s) >= MIN_PARTIAL_MATCHES)
-      .sort(sortByMatchQuality);
+    const fullCount = results.filter((s) =>
+      s.conditions.every((c) => c.passed),
+    ).length;
+    const matchMode = fullCount > 0 ? "full" : "partial";
 
-    const results = fullMatches.length > 0 ? fullMatches : partialMatches;
-    const matchMode = fullMatches.length > 0 ? "full" : "partial";
-
-    // Final price refresh for returned stocks so the UI shows the latest tick.
     if (results.length > 0) {
       const latestQuotes = await fetchStockQuotes(
         results.map((s) => ({ code: s.code, market: s.market })),

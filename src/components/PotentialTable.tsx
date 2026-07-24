@@ -470,13 +470,6 @@ export function PotentialTable({
                       <ConditionItem key={c.id} condition={c} />
                     ))}
                   </div>
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {s.signals.map((sig) => (
-                      <span key={sig} className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">
-                        {sig}
-                      </span>
-                    ))}
-                  </div>
                 </td>
               </tr>
             ))}

@@ -7,21 +7,40 @@ import { StockTable } from "@/components/StockTable";
 import { PotentialSearchBar } from "@/components/PotentialSearchBar";
 import { PotentialStatsCards } from "@/components/PotentialStatsCards";
 import { PotentialTable } from "@/components/PotentialTable";
-import type { LimitUpResponse, PotentialResponse } from "@/types/stock";
+import { AnalyzeSearchBar } from "@/components/AnalyzeSearchBar";
+import { StockAnalyzePanel } from "@/components/StockAnalyzePanel";
+import type {
+  LimitUpResponse,
+  PotentialResponse,
+  StockAnalyzeResponse,
+  StockCandidate,
+} from "@/types/stock";
+
+type TabId = "limitUp" | "potential" | "analyze";
 
 export default function Home() {
-  const [tab, setTab] = useState<"limitUp" | "potential">("limitUp");
+  const [tab, setTab] = useState<TabId>("limitUp");
 
   const [limitData, setLimitData] = useState<LimitUpResponse | null>(null);
-  const [potentialData, setPotentialData] = useState<PotentialResponse | null>(null);
+  const [potentialData, setPotentialData] = useState<PotentialResponse | null>(
+    null,
+  );
+  const [analyzeData, setAnalyzeData] = useState<StockAnalyzeResponse | null>(
+    null,
+  );
+  const [analyzeCandidates, setAnalyzeCandidates] = useState<
+    StockCandidate[] | undefined
+  >(undefined);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [analyzeQuery, setAnalyzeQuery] = useState("");
   const [minScore, setMinScore] = useState(0);
   const [potentialMinScore, setPotentialMinScore] = useState(0);
   const [limitHasSearched, setLimitHasSearched] = useState(false);
   const [potentialHasSearched, setPotentialHasSearched] = useState(false);
+  const [analyzeHasSearched, setAnalyzeHasSearched] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -80,6 +99,74 @@ export default function Home() {
     }
   }, [search, potentialMinScore]);
 
+  const fetchAnalyze = useCallback(async (queryOverride?: string) => {
+    const q = (queryOverride ?? analyzeQuery).trim();
+    if (!q) {
+      setError("請輸入股票代號或名稱");
+      return;
+    }
+
+    if (queryOverride != null) {
+      setAnalyzeQuery(queryOverride);
+    }
+
+    setLoading(true);
+    setError(null);
+    setAnalyzeCandidates(undefined);
+
+    try {
+      const params = new URLSearchParams({
+        q,
+        _t: String(Date.now()),
+      });
+
+      const res = await fetch(`/api/stocks/analyze?${params.toString()}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+
+      const json = await res.json();
+
+      if (res.status === 409 && Array.isArray(json.candidates)) {
+        setAnalyzeData(null);
+        setAnalyzeCandidates(json.candidates);
+        setAnalyzeHasSearched(true);
+        setError(json.error ?? "找到多檔符合股票，請選擇其中一檔");
+        return;
+      }
+
+      if (!res.ok) {
+        setAnalyzeData(null);
+        throw new Error(json.error ?? "分析失敗");
+      }
+
+      setAnalyzeData(json as StockAnalyzeResponse);
+      setAnalyzeCandidates(undefined);
+      setAnalyzeHasSearched(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "未知錯誤");
+    } finally {
+      setLoading(false);
+    }
+  }, [analyzeQuery]);
+
+  const tabBtn = (id: TabId, label: string) => (
+    <button
+      type="button"
+      onClick={() => {
+        setTab(id);
+        setError(null);
+      }}
+      className={`rounded-xl border px-4 py-2 text-sm transition ${
+        tab === id
+          ? "border-red-500/40 bg-red-500/10 text-red-300"
+          : "border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-900"
+      }`}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <main className="min-h-screen bg-zinc-950">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-red-950/20 via-zinc-950 to-zinc-950" />
@@ -104,33 +191,16 @@ export default function Home() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-zinc-100">台股股票篩選</h1>
-              <p className="text-sm text-zinc-500">切換頁籤查看漲停股與優質潛力股</p>
+              <p className="text-sm text-zinc-500">
+                漲停篩選、優質潛力股與個股分析建議
+              </p>
             </div>
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setTab("limitUp")}
-              className={`rounded-xl border px-4 py-2 text-sm transition ${
-                tab === "limitUp"
-                  ? "border-red-500/40 bg-red-500/10 text-red-300"
-                  : "border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-900"
-              }`}
-            >
-              漲停股篩選
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab("potential")}
-              className={`rounded-xl border px-4 py-2 text-sm transition ${
-                tab === "potential"
-                  ? "border-red-500/40 bg-red-500/10 text-red-300"
-                  : "border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-900"
-              }`}
-            >
-              優質潛力股
-            </button>
+            {tabBtn("limitUp", "漲停股篩選")}
+            {tabBtn("potential", "優質潛力股")}
+            {tabBtn("analyze", "個股分析建議")}
           </div>
         </header>
 
@@ -181,6 +251,15 @@ export default function Home() {
               onMinScoreChange={setPotentialMinScore}
             />
           )}
+
+          {tab === "analyze" && (
+            <AnalyzeSearchBar
+              value={analyzeQuery}
+              onChange={setAnalyzeQuery}
+              onSearch={() => fetchAnalyze()}
+              loading={loading}
+            />
+          )}
         </div>
 
         {error && (
@@ -206,13 +285,23 @@ export default function Home() {
           />
         )}
 
+        {tab === "analyze" && (
+          <StockAnalyzePanel
+            data={analyzeData}
+            loading={loading}
+            hasSearched={analyzeHasSearched}
+            candidates={analyzeCandidates}
+            onSelectCandidate={(code) => fetchAnalyze(code)}
+          />
+        )}
+
         <footer className="mt-8 text-center text-xs text-zinc-600">
           <p>
             行情來自證交所 MIS 即時報價（手動篩選時更新）·
             主力分數綜合評估法人、量能與五檔委託
           </p>
           <p className="mt-1">
-            優質潛力股使用歷史 K 線、融資餘額與集保籌碼（僅供參考，不構成投資建議）
+            優質潛力股與個股分析使用歷史 K 線、融資餘額與集保籌碼（僅供參考，不構成投資建議）
           </p>
         </footer>
       </div>

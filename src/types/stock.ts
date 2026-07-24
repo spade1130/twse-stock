@@ -85,3 +85,40 @@ export interface PotentialResponse {
   matchMode: PotentialMatchMode;
   stocks: PotentialStock[];
 }
+
+export type AdviceAction =
+  | "逢低布局"
+  | "偏多觀察"
+  | "強勢追蹤"
+  | "追高風險"
+  | "觀望"
+  | "暫不建議";
+
+export type AdviceConfidence = "high" | "medium" | "low";
+
+export interface StockAdvice {
+  action: AdviceAction;
+  confidence: AdviceConfidence;
+  summary: string;
+  reasons: string[];
+  risks: string[];
+  combinedScore: number;
+}
+
+export interface StockCandidate {
+  code: string;
+  name: string;
+  market: Market;
+}
+
+export interface StockAnalyzeResponse {
+  updatedAt: string;
+  tradeDate: string;
+  dataSource: "realtime" | "daily";
+  marketStatus: "open" | "closed" | "unknown";
+  stock: LimitUpStock;
+  potential: PotentialStock | null;
+  potentialNote?: string;
+  advice: StockAdvice;
+  candidates?: StockCandidate[];
+}

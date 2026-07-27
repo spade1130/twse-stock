@@ -64,7 +64,11 @@ function parsePrices(value?: string): number[] {
     .split("_")
     .filter(Boolean)
     .map((v) => parseFloat(v))
-    .filter((n) => Number.isFinite(n));
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+function firstPositivePrice(prices: number[]): number {
+  return prices.find((p) => p > 0) ?? 0;
 }
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -218,11 +222,31 @@ function resolveLatestPrice(msg: RawStockMsg, yesterdayClose: number): number {
   const lastDeal = parseNum(msg.z);
   if (lastDeal > 0) return lastDeal;
 
-  const bid = parsePrices(msg.b)[0] ?? 0;
-  const ask = parsePrices(msg.a)[0] ?? 0;
+  const bid = firstPositivePrice(parsePrices(msg.b));
+  const ask = firstPositivePrice(parsePrices(msg.a));
   if (bid > 0 && ask > 0) return (bid + ask) / 2;
   if (bid > 0) return bid;
   if (ask > 0) return ask;
+
+  // Locked limit-up: no tick and no ask; MIS may pad bid with 0.0000 placeholders.
+  const limitUp = parseNum(msg.u);
+  const high = parseNum(msg.h);
+  const open = parseNum(msg.o);
+  const tolerance = 0.005;
+  if (
+    limitUp > 0 &&
+    high > 0 &&
+    Math.abs(high - limitUp) <= tolerance
+  ) {
+    return limitUp;
+  }
+  if (
+    limitUp > 0 &&
+    open > 0 &&
+    Math.abs(open - limitUp) <= tolerance
+  ) {
+    return limitUp;
+  }
 
   return yesterdayClose > 0 ? yesterdayClose : 0;
 }

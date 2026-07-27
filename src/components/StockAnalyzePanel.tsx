@@ -1,5 +1,7 @@
 "use client";
 
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   AdviceAction,
   StockAnalyzeResponse,
@@ -25,6 +27,104 @@ interface StockAnalyzePanelProps {
 function formatVolume(n: number): string {
   if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}萬`;
   return n.toLocaleString();
+}
+
+function MetricTooltip({
+  label,
+  description,
+  children,
+}: {
+  label: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  const triggerRef = useRef<HTMLSpanElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [coords, setCoords] = useState({
+    x: 0,
+    y: 0,
+    placement: "bottom" as "top" | "bottom",
+  });
+
+  const updatePosition = useCallback(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const estimatedHeight = 96;
+    const gap = 8;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const preferBelow =
+      spaceBelow >= estimatedHeight + gap || spaceBelow >= spaceAbove;
+
+    if (preferBelow) {
+      setCoords({ x: centerX, y: rect.bottom + gap, placement: "bottom" });
+    } else {
+      setCoords({ x: centerX, y: rect.top - gap, placement: "top" });
+    }
+  }, []);
+
+  const show = useCallback(() => {
+    updatePosition();
+    setVisible(true);
+  }, [updatePosition]);
+
+  const hide = useCallback(() => setVisible(false), []);
+
+  useEffect(() => {
+    if (!visible) return;
+
+    const handleReposition = () => updatePosition();
+    window.addEventListener("scroll", handleReposition, true);
+    window.addEventListener("resize", handleReposition);
+
+    return () => {
+      window.removeEventListener("scroll", handleReposition, true);
+      window.removeEventListener("resize", handleReposition);
+    };
+  }, [visible, updatePosition]);
+
+  const tooltip =
+    visible &&
+    createPortal(
+      <div
+        role="tooltip"
+        style={{
+          position: "fixed",
+          left: coords.x,
+          top: coords.y,
+          transform:
+            coords.placement === "bottom"
+              ? "translateX(-50%)"
+              : "translate(-50%, -100%)",
+        }}
+        className="z-[200] w-56 rounded-lg border border-zinc-700 bg-zinc-900 p-3 text-left shadow-xl"
+        onMouseEnter={show}
+        onMouseLeave={hide}
+      >
+        <p className="text-xs font-medium text-zinc-200">{label}</p>
+        <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
+          {description}
+        </p>
+      </div>,
+      document.body,
+    );
+
+  return (
+    <>
+      <span
+        ref={triggerRef}
+        className="cursor-help border-b border-dotted border-zinc-600 transition hover:text-zinc-300"
+        onMouseEnter={show}
+        onMouseLeave={hide}
+      >
+        {children}
+      </span>
+      {tooltip}
+    </>
+  );
 }
 
 function ScoreBadge({ score }: { score: number }) {
@@ -190,13 +290,48 @@ export function StockAnalyzePanel({
                 {stock.change.toFixed(2)}（{stock.changePercent.toFixed(2)}%）
               </span>
             </div>
-            <p className="mt-2 text-xs text-zinc-500">
-              成交量 {formatVolume(stock.volume)} 股
-              {stock.volumeRatio > 0 &&
-                ` · 量比 ${stock.volumeRatio.toFixed(2)}x`}
-              {stock.institutionalNet !== 0 &&
-                ` · 法人淨額 ${stock.institutionalNet > 0 ? "+" : ""}${formatVolume(stock.institutionalNet)}`}
-              {stock.updateTime && ` · ${stock.updateTime}`}
+            <p className="mt-2 flex flex-wrap items-center gap-x-1 text-xs text-zinc-500">
+              <MetricTooltip
+                label="成交量"
+                description="今日截至目前的成交股數。數值越大代表當日交投越熱絡。"
+              >
+                成交量 {formatVolume(stock.volume)} 股
+              </MetricTooltip>
+              {stock.volumeRatio > 0 && (
+                <>
+                  <span aria-hidden>·</span>
+                  <MetricTooltip
+                    label="量比"
+                    description={`今日成交量 ÷ 昨日成交量。目前為 ${stock.volumeRatio.toFixed(2)} 倍；≥ 1.5 視為量能放大，≥ 3 視為量能爆發。`}
+                  >
+                    量比 {stock.volumeRatio.toFixed(2)}x
+                  </MetricTooltip>
+                </>
+              )}
+              {stock.institutionalNet !== 0 && (
+                <>
+                  <span aria-hidden>·</span>
+                  <MetricTooltip
+                    label="法人淨額"
+                    description={`三大法人（外資、投信、自營商）當日買賣超合計。正數為買超、負數為賣超；目前為 ${stock.institutionalNet > 0 ? "買超" : "賣超"} ${formatVolume(Math.abs(stock.institutionalNet))} 股。`}
+                  >
+                    法人淨額{" "}
+                    {stock.institutionalNet > 0 ? "+" : ""}
+                    {formatVolume(stock.institutionalNet)}
+                  </MetricTooltip>
+                </>
+              )}
+              {stock.updateTime && (
+                <>
+                  <span aria-hidden>·</span>
+                  <MetricTooltip
+                    label="更新時間"
+                    description="即時報價最後更新時間（證交所 MIS）。盤後或改用日收盤資料時可能空白或延遲。"
+                  >
+                    {stock.updateTime}
+                  </MetricTooltip>
+                </>
+              )}
             </p>
           </div>
 

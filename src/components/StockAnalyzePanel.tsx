@@ -308,7 +308,7 @@ export function StockAnalyzePanel({
               </MetricTooltip>
               {stock.volumeRatio > 0 && (
                 <>
-                  <span aria-hidden>·</span>
+                  <span aria-hidden>．</span>
                   <MetricTooltip
                     label="量比"
                     description={`今日成交量 ÷ 昨日成交量。目前為 ${stock.volumeRatio.toFixed(2)} 倍；≥ 1.5 視為量能放大，≥ 3 視為量能爆發。`}
@@ -319,7 +319,7 @@ export function StockAnalyzePanel({
               )}
               {stock.institutionalNet !== 0 && (
                 <>
-                  <span aria-hidden>·</span>
+                  <span aria-hidden>．</span>
                   <MetricTooltip
                     label="法人淨額"
                     description={`三大法人（外資、投信、自營商）當日買賣超合計。正數為買超、負數為賣超；目前為 ${stock.institutionalNet > 0 ? "買超" : "賣超"} ${formatVolume(Math.abs(stock.institutionalNet))} 股。`}
@@ -332,7 +332,7 @@ export function StockAnalyzePanel({
               )}
               {stock.updateTime && (
                 <>
-                  <span aria-hidden>·</span>
+                  <span aria-hidden>．</span>
                   <MetricTooltip
                     label="更新時間"
                     description="即時報價最後更新時間（證交所 MIS）。盤後或改用日收盤資料時可能空白或延遲。"

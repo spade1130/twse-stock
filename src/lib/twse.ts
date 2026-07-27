@@ -134,6 +134,15 @@ function rocDate(d = new Date()): string {
   return `${rocYear}${month}${day}`;
 }
 
+/** TWSE fund APIs (e.g. T86) expect western YYYYMMDD, not ROC. */
+function westernYmd(d = new Date()): string {
+  const taipeiNow = getTaipeiDateTime(d);
+  const year = String(taipeiNow.year);
+  const month = String(taipeiNow.month).padStart(2, "0");
+  const day = String(taipeiNow.day).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
 function previousRocDate(d = new Date()): string {
   const prev = new Date(d.getTime() - 24 * 60 * 60 * 1000);
   return rocDate(prev);
@@ -364,14 +373,16 @@ async function fetchTwseInstitutional(date: string): Promise<InstitutionalData[]
 
   if (res?.stat !== "OK" || !res.data?.length) return [];
 
+  // T86 fields (0-based):
+  // 4 外陸資買賣超, 10 投信買賣超, 11 自營商買賣超(合計), 18 三大法人買賣超
   return res.data.map((row) =>
     parseInstitutionalRow(
-      row[0],
+      row[0]?.trim() ?? "",
       row[1] ?? "",
       parseInt((row[4] ?? "0").replace(/,/g, ""), 10) || 0,
       parseInt((row[10] ?? "0").replace(/,/g, ""), 10) || 0,
-      parseInt((row[14] ?? "0").replace(/,/g, ""), 10) || 0,
-      parseInt((row[17] ?? "0").replace(/,/g, ""), 10) || 0,
+      parseInt((row[11] ?? "0").replace(/,/g, ""), 10) || 0,
+      parseInt((row[18] ?? "0").replace(/,/g, ""), 10) || 0,
     ),
   );
 }
@@ -402,7 +413,7 @@ async function fetchOtcInstitutional(date: string): Promise<InstitutionalData[]>
 export async function getInstitutionalData(): Promise<
   Map<string, InstitutionalData>
 > {
-  const today = rocDate();
+  const today = westernYmd();
   const now = Date.now();
   if (
     institutionalCache?.date === today &&
@@ -417,10 +428,11 @@ export async function getInstitutionalData(): Promise<
   if (twseToday.length > 0) {
     for (const row of twseToday) data.set(row.code, row);
   } else {
-    const fallbackDates = [previousRocDate()];
-    for (let i = 0; i < 3; i++) {
-      const d = new Date(Date.now() - (i + 2) * 24 * 60 * 60 * 1000);
-      fallbackDates.push(rocDate(d));
+    // Today may be empty before T86 publishes (or on weekends/holidays).
+    const fallbackDates: string[] = [];
+    for (let i = 1; i <= 7; i++) {
+      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+      fallbackDates.push(westernYmd(d));
     }
     for (const date of [...new Set(fallbackDates)]) {
       const rows = await fetchTwseInstitutional(date);

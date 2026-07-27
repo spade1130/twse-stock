@@ -195,7 +195,7 @@ export function StockAnalyzePanel({
               {stock.volumeRatio > 0 &&
                 ` · 量比 ${stock.volumeRatio.toFixed(2)}x`}
               {stock.institutionalNet !== 0 &&
-                ` · 法人淨額 ${formatVolume(stock.institutionalNet)}`}
+                ` · 法人淨額 ${stock.institutionalNet > 0 ? "+" : ""}${formatVolume(stock.institutionalNet)}`}
               {stock.updateTime && ` · ${stock.updateTime}`}
             </p>
           </div>

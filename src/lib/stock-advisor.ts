@@ -95,6 +95,7 @@ export function buildStockAdvice(
       "短線主力訊號偏強並處於漲停，屬動能股而非價值布局，僅適合嚴格停損的短線操作。";
   } else if (matchScore < 30 && mainScore < 30) {
     action = "暫不建議";
+    // 兩邊都弱 → 對「不建議進場」的結論把握高（非看多信心）
     confidence = "high";
     summary =
       "主力動能與潛力條件皆偏弱，目前不符合兩套篩選邏輯的進場條件。";

@@ -163,12 +163,21 @@ function actionStyles(action: AdviceAction): string {
 function confidenceLabel(level: StockAnalyzeResponse["advice"]["confidence"]) {
   switch (level) {
     case "high":
-      return "信心：高";
+      return "判定把握：高";
     case "medium":
-      return "信心：中";
+      return "判定把握：中";
     default:
-      return "信心：低";
+      return "判定把握：低";
   }
+}
+
+function confidenceDescription(
+  action: AdviceAction,
+  level: StockAnalyzeResponse["advice"]["confidence"],
+): string {
+  const levelText =
+    level === "high" ? "高" : level === "medium" ? "中" : "低";
+  return `表示系統對「${action}」這項結論的把握程度（${levelText}），不是看好或看壞的強度。例如「暫不建議」搭配「判定把握：高」，代表主力與潛力分數皆偏弱、不建議進場的訊號較明確。`;
 }
 
 export function StockAnalyzePanel({
@@ -356,9 +365,17 @@ export function StockAnalyzePanel({
           <span className="text-xl font-semibold tracking-wide">
             {advice.action}
           </span>
-          <span className="rounded-full border border-current/20 px-2 py-0.5 text-[11px] opacity-80">
-            {confidenceLabel(advice.confidence)}
-          </span>
+          <MetricTooltip
+            label="判定把握"
+            description={confidenceDescription(
+              advice.action,
+              advice.confidence,
+            )}
+          >
+            <span className="rounded-full border border-current/20 px-2 py-0.5 text-[11px] opacity-80">
+              {confidenceLabel(advice.confidence)}
+            </span>
+          </MetricTooltip>
         </div>
         <p className="mt-2 text-sm leading-relaxed opacity-90">{advice.summary}</p>
 

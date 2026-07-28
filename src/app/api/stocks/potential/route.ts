@@ -19,17 +19,173 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 const MAX_HISTORY_CANDIDATES = 120;
-const MIN_HISTORY_BARS = 60;
+const HISTORY_MONTHS = 6;
+const MIN_HISTORY_BARS = 80;
+const MIN_HISTORY_CLOSES = 61;
+const MIN_HISTORY_SPAN_DAYS = 75;
 const MARGIN_CANDIDATE_POOL = 100;
 const CHIP_CANDIDATE_POOL = 80;
 const VOLUME_FALLBACK_POOL = 40;
 const DEFAULT_MIN_SCORE = 0;
+const OPEN_MARKET_CACHE_MS = 30 * 1000;
+
+interface PotentialCacheEntry {
+  expiresAt: number;
+  response: PotentialResponse;
+}
+
+const potentialResponseCache = new Map<string, PotentialCacheEntry>();
+
+interface TaipeiDateTime {
+  year: number;
+  month: number;
+  day: number;
+  hours: number;
+  minutes: number;
+  weekday: number;
+}
+
+const WEEKDAY_MAP: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
 
 function formatTradeDateISO(raw: string): string {
   if (/^\d{8}$/.test(raw)) {
     return `${raw.slice(0, 4)}/${raw.slice(4, 6)}/${raw.slice(6, 8)}`;
   }
   return raw;
+}
+
+function toTradeDateISO(raw: string): string {
+  const formatted = formatTradeDateISO(raw);
+  return formatted.replace(/\//g, "-");
+}
+
+function hasStablePotentialHistory(
+  history: DailyBar[],
+  tradeDateISO: string,
+): boolean {
+  if (history.length < MIN_HISTORY_BARS) return false;
+
+  const validCloses = history.filter((bar) => bar.close > 0).length;
+  if (validCloses < MIN_HISTORY_CLOSES) return false;
+
+  const oldest = history[0]?.date;
+  if (!oldest) return false;
+
+  const cutoff = new Date(tradeDateISO);
+  cutoff.setDate(cutoff.getDate() - MIN_HISTORY_SPAN_DAYS);
+  const cutoffISO = cutoff.toISOString().slice(0, 10);
+
+  return oldest <= cutoffISO;
+}
+
+function buildPotentialCacheKey(params: {
+  tradeDate: string;
+  dataSource: string;
+  marketStatus: "open" | "closed" | "unknown";
+  q: string;
+  minScore: number;
+}): string {
+  return [
+    params.tradeDate,
+    params.dataSource,
+    params.marketStatus,
+    params.q,
+    String(params.minScore),
+  ].join("|");
+}
+
+function clonePotentialResponse(response: PotentialResponse): PotentialResponse {
+  return {
+    ...response,
+    stocks: response.stocks.map((stock) => ({
+      ...stock,
+      conditions: stock.conditions.map((condition) => ({ ...condition })),
+      signals: [...stock.signals],
+    })),
+  };
+}
+
+function getTaipeiDateTime(d = new Date()): TaipeiDateTime {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
+    hourCycle: "h23",
+  }).formatToParts(d);
+
+  const getPart = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  return {
+    year: parseInt(getPart("year"), 10),
+    month: parseInt(getPart("month"), 10),
+    day: parseInt(getPart("day"), 10),
+    hours: parseInt(getPart("hour"), 10),
+    minutes: parseInt(getPart("minute"), 10),
+    weekday: WEEKDAY_MAP[getPart("weekday")] ?? -1,
+  };
+}
+
+function taipeiDateTimeToTimestamp(
+  year: number,
+  month: number,
+  day: number,
+  hours: number,
+  minutes: number,
+): number {
+  return Date.UTC(year, month - 1, day, hours - 8, minutes, 0, 0);
+}
+
+function nextMarketOpenTimestamp(now = new Date()): number {
+  const taipeiNow = getTaipeiDateTime(now);
+  const currentMinutes = taipeiNow.hours * 60 + taipeiNow.minutes;
+  const isWeekday = taipeiNow.weekday >= 1 && taipeiNow.weekday <= 5;
+
+  if (isWeekday && currentMinutes < 9 * 60) {
+    return taipeiDateTimeToTimestamp(
+      taipeiNow.year,
+      taipeiNow.month,
+      taipeiNow.day,
+      9,
+      0,
+    );
+  }
+
+  for (let addDays = 1; addDays <= 7; addDays++) {
+    const candidate = new Date(
+      taipeiDateTimeToTimestamp(
+        taipeiNow.year,
+        taipeiNow.month,
+        taipeiNow.day + addDays,
+        12,
+        0,
+      ),
+    );
+    const taipeiCandidate = getTaipeiDateTime(candidate);
+    if (taipeiCandidate.weekday >= 1 && taipeiCandidate.weekday <= 5) {
+      return taipeiDateTimeToTimestamp(
+        taipeiCandidate.year,
+        taipeiCandidate.month,
+        taipeiCandidate.day,
+        9,
+        0,
+      );
+    }
+  }
+
+  return now.getTime() + OPEN_MARKET_CACHE_MS;
 }
 
 function calcGain60dPct(
@@ -188,10 +344,30 @@ export async function GET(request: NextRequest) {
     : DEFAULT_MIN_SCORE;
 
   try {
-    const [latest, margins] = await Promise.all([
-      fetchLatestQuotes(),
-      fetchLatestMargins(),
-    ]);
+    const latest = await fetchLatestQuotes();
+    const marketStatus = getMarketStatus();
+    const cacheKey = buildPotentialCacheKey({
+      tradeDate: formatTradeDateISO(latest.tradeDate),
+      dataSource: latest.dataSource,
+      marketStatus,
+      q,
+      minScore,
+    });
+    const cached = potentialResponseCache.get(cacheKey);
+    if (cached && cached.response.stocks.length === 0) {
+      potentialResponseCache.delete(cacheKey);
+    } else if (cached && cached.expiresAt > Date.now()) {
+      return NextResponse.json(clonePotentialResponse(cached.response), {
+        headers: {
+          "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+          Pragma: "no-cache",
+          Expires: "0",
+        },
+      });
+    }
+
+    const margins = await fetchLatestMargins();
+    const tradeDateISO = toTradeDateISO(latest.tradeDate);
 
     const validStocks = latest.stocks.filter(
       (s) => s.price > 0 && s.volume > 0 && s.market === "tse",
@@ -238,14 +414,14 @@ export async function GET(request: NextRequest) {
 
     const stocks = (
       await mapLimit(candidates, 8, async (stock): Promise<PotentialStock | null> => {
-        const history = await fetchStockHistory(stock.code, stock.market, 4);
-        if (history.length < MIN_HISTORY_BARS) return null;
+        const history = await fetchStockHistory(
+          stock.code,
+          stock.market,
+          HISTORY_MONTHS,
+        );
+        if (!hasStablePotentialHistory(history, tradeDateISO)) return null;
 
-        const todayISO =
-          history[history.length - 1]?.date ??
-          new Date().toISOString().slice(0, 10);
-
-        const gain60dPct = calcGain60dPct(stock.price, history, todayISO);
+        const gain60dPct = calcGain60dPct(stock.price, history, tradeDateISO);
 
         const chip = tdcc.latest.get(stock.code) ?? null;
         const chipPrev = tdcc.previous.get(stock.code) ?? null;
@@ -318,13 +494,24 @@ export async function GET(request: NextRequest) {
       updatedAt: new Date().toISOString(),
       tradeDate: formatTradeDateISO(latest.tradeDate),
       dataSource: latest.dataSource,
-      marketStatus: getMarketStatus(),
+      marketStatus,
       totalScanned: latest.stocks.length,
       marginFiltered: candidates.length,
       historyAnalyzed: stocks.length,
       matchMode,
       stocks: results,
     };
+
+    if (response.stocks.length > 0) {
+      potentialResponseCache.set(cacheKey, {
+        expiresAt:
+          Date.now() +
+          (marketStatus === "open"
+            ? OPEN_MARKET_CACHE_MS
+            : Math.max(1, nextMarketOpenTimestamp() - Date.now())),
+        response: clonePotentialResponse(response),
+      });
+    }
 
     return NextResponse.json(response, {
       headers: {

@@ -24,7 +24,29 @@ import type {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MIN_HISTORY_BARS = 40;
+const HISTORY_MONTHS = 6;
+const MIN_HISTORY_BARS = 80;
+const MIN_HISTORY_CLOSES = 61;
+const MIN_HISTORY_SPAN_DAYS = 75;
+
+function hasStablePotentialHistory(
+  history: DailyBar[],
+  tradeDateISO: string,
+): boolean {
+  if (history.length < MIN_HISTORY_BARS) return false;
+
+  const validCloses = history.filter((bar) => bar.close > 0).length;
+  if (validCloses < MIN_HISTORY_CLOSES) return false;
+
+  const oldest = history[0]?.date;
+  if (!oldest) return false;
+
+  const cutoff = new Date(tradeDateISO);
+  cutoff.setDate(cutoff.getDate() - MIN_HISTORY_SPAN_DAYS);
+  const cutoffISO = cutoff.toISOString().slice(0, 10);
+
+  return oldest <= cutoffISO;
+}
 
 function calcGain60dPct(
   currentPrice: number,
@@ -183,18 +205,21 @@ export async function GET(request: NextRequest) {
       institutional.get(stock.code),
     );
 
-    const history = await fetchStockHistory(stock.code, stock.market, 4);
+    const history = await fetchStockHistory(
+      stock.code,
+      stock.market,
+      HISTORY_MONTHS,
+    );
+    const tradeDateISO = new Date().toISOString().slice(0, 10);
 
     let potential: PotentialStock | null = null;
     let potentialNote: string | undefined;
 
-    if (history.length < MIN_HISTORY_BARS) {
-      potentialNote = `歷史 K 線不足（${history.length} 根，建議至少 ${MIN_HISTORY_BARS} 根），潛力評估略過`;
+    if (!hasStablePotentialHistory(history, tradeDateISO)) {
+      potentialNote =
+        `歷史 K 線不足或不完整（${history.length} 根，需至少 ${MIN_HISTORY_BARS} 根且覆蓋 ${MIN_HISTORY_SPAN_DAYS} 天），潛力評估略過`;
     } else {
-      const todayISO =
-        history[history.length - 1]?.date ??
-        new Date().toISOString().slice(0, 10);
-      const gain60dPct = calcGain60dPct(stock.price, history, todayISO);
+      const gain60dPct = calcGain60dPct(stock.price, history, tradeDateISO);
 
       potential = analyzePotentialStock({
         code: stock.code,

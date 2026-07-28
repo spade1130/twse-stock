@@ -2,6 +2,8 @@ import type { Market } from "@/types/stock";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+const HISTORY_FETCH_RETRIES = 3;
+const HISTORY_FETCH_RETRY_MS = 150;
 
 export interface DailyBar {
   date: string;
@@ -29,6 +31,10 @@ function parseRocDate(value: string): string {
 
 function sortBars(bars: DailyBar[]): DailyBar[] {
   return [...bars].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fetchTwseMonth(
@@ -118,19 +124,35 @@ function toTpexRocMonth(d: Date): string {
   return `${rocYear}/${month}`;
 }
 
+async function fetchMonthWithRetry(
+  fetcher: () => Promise<DailyBar[]>,
+): Promise<DailyBar[]> {
+  let lastResult: DailyBar[] = [];
+
+  for (let attempt = 0; attempt < HISTORY_FETCH_RETRIES; attempt++) {
+    lastResult = await fetcher();
+    if (lastResult.length > 0) return lastResult;
+    if (attempt < HISTORY_FETCH_RETRIES - 1) {
+      await delay(HISTORY_FETCH_RETRY_MS * (attempt + 1));
+    }
+  }
+
+  return lastResult;
+}
+
 export async function fetchStockHistory(
   code: string,
   market: Market,
-  months = 4,
+  months = 6,
 ): Promise<DailyBar[]> {
   const now = new Date();
   const monthDates = monthOffsets(now, months);
   const chunks = await Promise.all(
     monthDates.map((d) => {
       if (market === "tse") {
-        return fetchTwseMonth(code, toTwseDate(d));
+        return fetchMonthWithRetry(() => fetchTwseMonth(code, toTwseDate(d)));
       }
-      return fetchTpexMonth(code, toTpexRocMonth(d));
+      return fetchMonthWithRetry(() => fetchTpexMonth(code, toTpexRocMonth(d)));
     }),
   );
 

@@ -75,7 +75,6 @@ export default function Home() {
     try {
       const params = new URLSearchParams({
         minScore: String(potentialMinScore),
-        _t: String(Date.now()),
       });
       if (search) params.set("q", search);
 
@@ -84,13 +83,29 @@ export default function Home() {
         headers: { "Cache-Control": "no-cache" },
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error ?? "資料載入失敗");
+      const text = await res.text();
+      let json: PotentialResponse | { error?: string } | null = null;
+      try {
+        json = text ? (JSON.parse(text) as PotentialResponse | { error?: string }) : null;
+      } catch {
+        if (
+          text.includes("FUNCTION_INVOCATION_TIMEOUT") ||
+          text.includes("An error occurred with your deployment")
+        ) {
+          throw new Error(
+            "伺服器處理逾時，請稍後再試一次（篩選請求較重，偶發會超時）",
+          );
+        }
+        throw new Error("伺服器回應格式異常，請稍後再試");
       }
 
-      const json: PotentialResponse = await res.json();
-      setPotentialData(json);
+      if (!res.ok) {
+        throw new Error(
+          (json && "error" in json && json.error) || "資料載入失敗",
+        );
+      }
+
+      setPotentialData(json as PotentialResponse);
       setPotentialHasSearched(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "未知錯誤");

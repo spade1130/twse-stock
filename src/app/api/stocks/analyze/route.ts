@@ -24,10 +24,10 @@ import type {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const HISTORY_MONTHS = 6;
-const MIN_HISTORY_BARS = 80;
-const MIN_HISTORY_CLOSES = 61;
-const MIN_HISTORY_SPAN_DAYS = 75;
+const HISTORY_MONTHS = 4;
+const MIN_HISTORY_BARS = 60;
+const MIN_HISTORY_CLOSES = 60;
+const MIN_HISTORY_SPAN_DAYS = 65;
 
 function hasStablePotentialHistory(
   history: DailyBar[],

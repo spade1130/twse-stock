@@ -2,8 +2,9 @@ import type { Market } from "@/types/stock";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-const HISTORY_FETCH_RETRIES = 3;
-const HISTORY_FETCH_RETRY_MS = 150;
+const HISTORY_FETCH_RETRIES = 2;
+const HISTORY_FETCH_RETRY_MS = 120;
+const HISTORY_CACHE_TTL_MS = 60 * 60 * 1000;
 
 export interface DailyBar {
   date: string;
@@ -13,6 +14,13 @@ export interface DailyBar {
   close: number;
   volume: number;
 }
+
+interface HistoryCacheEntry {
+  expiresAt: number;
+  bars: DailyBar[];
+}
+
+const historyCache = new Map<string, HistoryCacheEntry>();
 
 function parseNum(value?: string): number {
   if (!value || value === "-" || value === "") return 0;
@@ -140,11 +148,22 @@ async function fetchMonthWithRetry(
   return lastResult;
 }
 
+function historyCacheKey(code: string, market: Market, months: number): string {
+  const day = new Date().toISOString().slice(0, 10);
+  return `${day}|${market}|${code}|${months}`;
+}
+
 export async function fetchStockHistory(
   code: string,
   market: Market,
-  months = 6,
+  months = 4,
 ): Promise<DailyBar[]> {
+  const key = historyCacheKey(code, market, months);
+  const cached = historyCache.get(key);
+  if (cached && cached.expiresAt > Date.now() && cached.bars.length > 0) {
+    return cached.bars;
+  }
+
   const now = new Date();
   const monthDates = monthOffsets(now, months);
   const chunks = await Promise.all(
@@ -163,7 +182,14 @@ export async function fetchStockHistory(
     }
   }
 
-  return sortBars(Array.from(merged.values()));
+  const bars = sortBars(Array.from(merged.values()));
+  if (bars.length > 0) {
+    historyCache.set(key, {
+      expiresAt: Date.now() + HISTORY_CACHE_TTL_MS,
+      bars,
+    });
+  }
+  return bars;
 }
 
 export function sma(values: number[], period: number): number {

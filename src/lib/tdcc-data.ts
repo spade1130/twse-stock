@@ -239,39 +239,44 @@ export function getTdccSnapshotCount(): number {
   return snapshotHistory.size;
 }
 
-export async function fetchTdccChipMetricsForCodesWithComparison(
-  codes: Set<string>,
-  minAgeDays = 20,
-): Promise<{
+interface TdccComparisonDateCache {
   latestDate: string;
   previousDate: string;
-  latest: Map<string, TdccChipMetrics>;
-  previous: Map<string, TdccChipMetrics>;
+  expiresAt: number;
+}
+
+let comparisonDateCache: TdccComparisonDateCache | null = null;
+const COMPARISON_DATE_CACHE_MS = 6 * 60 * 60 * 1000;
+
+async function resolveTdccComparisonDates(): Promise<{
+  latestDate: string;
+  previousDate: string;
 }> {
+  if (
+    comparisonDateCache &&
+    comparisonDateCache.expiresAt > Date.now() &&
+    comparisonDateCache.latestDate
+  ) {
+    return {
+      latestDate: comparisonDateCache.latestDate,
+      previousDate: comparisonDateCache.previousDate,
+    };
+  }
+
   const latestDate = await readFirstCsvRecordDate(true);
   if (!latestDate) {
-    return {
-      latestDate: "",
-      previousDate: "",
-      latest: new Map(),
-      previous: new Map(),
-    };
+    return { latestDate: "", previousDate: "" };
   }
 
   const latestD = ymdToDate(latestDate);
   if (!latestD) {
-    return {
-      latestDate,
-      previousDate: "",
-      latest: new Map(),
-      previous: new Map(),
-    };
+    return { latestDate, previousDate: "" };
   }
 
   // TDCC archive snapshots are weekly (typically Fridays). Step back in
   // weekly increments and allow +/- 2 days to align with actual files.
   let previousDate = "";
-  const weeklyOffsets = [21, 14, 28, 35, 42, 49];
+  const weeklyOffsets = [21, 14, 28, 35];
 
   outer: for (const offset of weeklyOffsets) {
     for (const dayAdjust of [0, -1, 1, -2, 2]) {
@@ -293,12 +298,49 @@ export async function fetchTdccChipMetricsForCodesWithComparison(
     }
   }
 
-  const latest = codes.size
-    ? await fetchTdccChipMetricsForCodes(latestDate, codes)
-    : new Map<string, TdccChipMetrics>();
-  const previous = previousDate
-    ? await fetchTdccChipMetricsForCodes(previousDate, codes)
-    : new Map<string, TdccChipMetrics>();
+  comparisonDateCache = {
+    latestDate,
+    previousDate,
+    expiresAt: Date.now() + COMPARISON_DATE_CACHE_MS,
+  };
+
+  return { latestDate, previousDate };
+}
+
+export async function fetchTdccChipMetricsForCodesWithComparison(
+  codes: Set<string>,
+  _minAgeDays = 20,
+): Promise<{
+  latestDate: string;
+  previousDate: string;
+  latest: Map<string, TdccChipMetrics>;
+  previous: Map<string, TdccChipMetrics>;
+}> {
+  if (codes.size === 0) {
+    return {
+      latestDate: "",
+      previousDate: "",
+      latest: new Map(),
+      previous: new Map(),
+    };
+  }
+
+  const { latestDate, previousDate } = await resolveTdccComparisonDates();
+  if (!latestDate) {
+    return {
+      latestDate: "",
+      previousDate: "",
+      latest: new Map(),
+      previous: new Map(),
+    };
+  }
+
+  const [latest, previous] = await Promise.all([
+    fetchTdccChipMetricsForCodes(latestDate, codes),
+    previousDate
+      ? fetchTdccChipMetricsForCodes(previousDate, codes)
+      : Promise.resolve(new Map<string, TdccChipMetrics>()),
+  ]);
 
   return { latestDate, previousDate, latest, previous };
 }

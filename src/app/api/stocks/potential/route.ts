@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  fetchLatestQuotes,
+  fetchDailyQuotes,
   fetchStockQuotes,
   getMarketStatus,
 } from "@/lib/twse";
@@ -16,18 +16,21 @@ import type { PotentialResponse, PotentialStock, StockInfo } from "@/types/stock
 import type { DailyBar } from "@/lib/stock-history";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+export const maxDuration = 60;
 
-const MAX_HISTORY_CANDIDATES = 120;
-const HISTORY_MONTHS = 6;
-const MIN_HISTORY_BARS = 80;
-const MIN_HISTORY_CLOSES = 61;
-const MIN_HISTORY_SPAN_DAYS = 75;
-const MARGIN_CANDIDATE_POOL = 100;
-const CHIP_CANDIDATE_POOL = 80;
-const VOLUME_FALLBACK_POOL = 40;
+// Keep the work small enough for Vercel serverless timeouts.
+const MAX_HISTORY_CANDIDATES = 40;
+const HISTORY_MONTHS = 4;
+const HISTORY_CONCURRENCY = 5;
+const MIN_HISTORY_BARS = 60;
+const MIN_HISTORY_CLOSES = 60;
+const MIN_HISTORY_SPAN_DAYS = 65;
+const MARGIN_CANDIDATE_POOL = 60;
+const CHIP_CANDIDATE_POOL = 50;
+const VOLUME_FALLBACK_POOL = 30;
+const TDCC_PREFILTER_POOL = 150;
 const DEFAULT_MIN_SCORE = 0;
-const OPEN_MARKET_CACHE_MS = 30 * 1000;
+const OPEN_MARKET_CACHE_MS = 2 * 60 * 1000;
 
 interface PotentialCacheEntry {
   expiresAt: number;
@@ -309,6 +312,37 @@ function buildCandidates(
     .map(({ stock }) => stock);
 }
 
+/** Shrink universe before expensive TDCC CSV parsing. */
+function buildTdccPrefilterPool(
+  validStocks: StockInfo[],
+  margins: Awaited<ReturnType<typeof fetchLatestMargins>>,
+): StockInfo[] {
+  const pool = new Map<string, StockInfo>();
+
+  const marginStocks = validStocks
+    .filter((stock) => {
+      const marginCurrent = margins.current.get(stock.code) ?? 0;
+      const marginPrevious = margins.previous.get(stock.code) ?? 0;
+      return marginPassesCondition(
+        calcMarginChangePct(marginCurrent, marginPrevious),
+      );
+    })
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, MARGIN_CANDIDATE_POOL);
+
+  for (const stock of marginStocks) {
+    pool.set(stock.code, stock);
+  }
+
+  const byVolume = [...validStocks].sort((a, b) => b.volume - a.volume);
+  for (const stock of byVolume) {
+    pool.set(stock.code, stock);
+    if (pool.size >= TDCC_PREFILTER_POOL) break;
+  }
+
+  return Array.from(pool.values());
+}
+
 async function mapLimit<T, R>(
   items: T[],
   concurrency: number,
@@ -344,11 +378,20 @@ export async function GET(request: NextRequest) {
     : DEFAULT_MIN_SCORE;
 
   try {
-    const latest = await fetchLatestQuotes();
     const marketStatus = getMarketStatus();
+    const [dailyStocks, margins] = await Promise.all([
+      fetchDailyQuotes(),
+      fetchLatestMargins(),
+    ]);
+
+    const today = new Date();
+    const tradeDate = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
+    const tradeDateISO = tradeDate.replace(/\//g, "-");
+    const dataSource = "daily" as const;
+
     const cacheKey = buildPotentialCacheKey({
-      tradeDate: formatTradeDateISO(latest.tradeDate),
-      dataSource: latest.dataSource,
+      tradeDate,
+      dataSource,
       marketStatus,
       q,
       minScore,
@@ -366,17 +409,31 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const margins = await fetchLatestMargins();
-    const tradeDateISO = toTradeDateISO(latest.tradeDate);
-
-    const validStocks = latest.stocks.filter(
+    const validStocks = dailyStocks.filter(
       (s) => s.price > 0 && s.volume > 0 && s.market === "tse",
     );
-    const allCodes = new Set(validStocks.map((s) => s.code));
 
-    const tdcc = await fetchTdccChipMetricsForCodesWithComparison(allCodes, 20);
+    // Only parse TDCC for a pre-filtered pool, not the entire market.
+    const prefilterPool = buildTdccPrefilterPool(validStocks, margins);
+    const tdccCodes = new Set(prefilterPool.map((s) => s.code));
 
-    let candidates = buildCandidates(validStocks, tdcc, margins);
+    if (q) {
+      for (const stock of validStocks) {
+        if (
+          stock.code.toLowerCase().includes(q) ||
+          stock.name.toLowerCase().includes(q)
+        ) {
+          tdccCodes.add(stock.code);
+          if (!prefilterPool.some((s) => s.code === stock.code)) {
+            prefilterPool.push(stock);
+          }
+        }
+      }
+    }
+
+    const tdcc = await fetchTdccChipMetricsForCodesWithComparison(tdccCodes, 20);
+
+    let candidates = buildCandidates(prefilterPool, tdcc, margins);
 
     if (q) {
       const existing = new Set(candidates.map((s) => s.code));
@@ -391,75 +448,58 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Re-fetch fresh quotes for candidates after the slow TDCC phase.
-    const freshQuotes = await fetchStockQuotes(
-      candidates.map((s) => ({ code: s.code, market: s.market })),
-    );
-    const freshByCode = new Map(freshQuotes.map((s) => [s.code, s]));
-    candidates = candidates.map((s) => {
-      const fresh = freshByCode.get(s.code);
-      if (!fresh || fresh.price <= 0) return s;
-      return {
-        ...s,
-        price: fresh.price,
-        open: fresh.open || s.open,
-        high: fresh.high || s.high,
-        low: fresh.low || s.low,
-        volume: fresh.volume || s.volume,
-        change: fresh.change,
-        changePercent: fresh.changePercent,
-        updateTime: fresh.updateTime,
-      };
-    });
-
     const stocks = (
-      await mapLimit(candidates, 8, async (stock): Promise<PotentialStock | null> => {
-        const history = await fetchStockHistory(
-          stock.code,
-          stock.market,
-          HISTORY_MONTHS,
-        );
-        if (!hasStablePotentialHistory(history, tradeDateISO)) return null;
+      await mapLimit(
+        candidates,
+        HISTORY_CONCURRENCY,
+        async (stock): Promise<PotentialStock | null> => {
+          const history = await fetchStockHistory(
+            stock.code,
+            stock.market,
+            HISTORY_MONTHS,
+          );
+          if (!hasStablePotentialHistory(history, tradeDateISO)) return null;
 
-        const gain60dPct = calcGain60dPct(stock.price, history, tradeDateISO);
+          const gain60dPct = calcGain60dPct(stock.price, history, tradeDateISO);
 
-        const chip = tdcc.latest.get(stock.code) ?? null;
-        const chipPrev = tdcc.previous.get(stock.code) ?? null;
+          const chip = tdcc.latest.get(stock.code) ?? null;
+          const chipPrev = tdcc.previous.get(stock.code) ?? null;
 
-        const marginCurrent = margins.current.get(stock.code) ?? 0;
-        const marginPrevious = margins.previous.get(stock.code) ?? 0;
+          const marginCurrent = margins.current.get(stock.code) ?? 0;
+          const marginPrevious = margins.previous.get(stock.code) ?? 0;
 
-        const result = analyzePotentialStock({
-          code: stock.code,
-          market: stock.market,
-          name: stock.name,
-          todays: {
-            price: stock.price,
-            open: stock.open,
-            high: stock.high,
-            volume: stock.volume,
-          },
-          history,
-          gain60dPct,
-          chip,
-          chipPrev,
-          marginCurrent,
-          marginPrevious,
-        });
+          const result = analyzePotentialStock({
+            code: stock.code,
+            market: stock.market,
+            name: stock.name,
+            todays: {
+              price: stock.price,
+              open: stock.open,
+              high: stock.high,
+              volume: stock.volume,
+            },
+            history,
+            gain60dPct,
+            chip,
+            chipPrev,
+            marginCurrent,
+            marginPrevious,
+          });
 
-        if (
-          q &&
-          !(
-            stock.code.toLowerCase().includes(q) ||
-            stock.name.toLowerCase().includes(q) ||
-            result.signals.some((s) => s.toLowerCase().includes(q))
-          )
-        ) {
-          return null;
-        }
+          if (
+            q &&
+            !(
+              stock.code.toLowerCase().includes(q) ||
+              stock.name.toLowerCase().includes(q) ||
+              result.signals.some((s) => s.toLowerCase().includes(q))
+            )
+          ) {
+            return null;
+          }
 
-        return result;
-      })
+          return result;
+        },
+      )
     ).filter((s): s is PotentialStock => s !== null);
 
     const results = stocks
@@ -492,10 +532,10 @@ export async function GET(request: NextRequest) {
 
     const response: PotentialResponse = {
       updatedAt: new Date().toISOString(),
-      tradeDate: formatTradeDateISO(latest.tradeDate),
-      dataSource: latest.dataSource,
+      tradeDate,
+      dataSource,
       marketStatus,
-      totalScanned: latest.stocks.length,
+      totalScanned: validStocks.length,
       marginFiltered: candidates.length,
       historyAnalyzed: stocks.length,
       matchMode,

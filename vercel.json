@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "src/app/api/stocks/potential/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/stocks/analyze/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}

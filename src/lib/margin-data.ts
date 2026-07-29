@@ -163,7 +163,11 @@ export async function fetchLatestMargins(): Promise<{
     `${currentDate.slice(0, 4)}-${currentDate.slice(4, 6)}-${currentDate.slice(6, 8)}T00:00:00`,
   );
 
-  for (let offset = 20; offset <= 40; offset++) {
+  // Prefer common ~1-month lookbacks first to avoid scanning every day.
+  const previousOffsets = [
+    22, 21, 23, 20, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+  ];
+  for (const offset of previousOffsets) {
     const d = new Date(baseDate);
     d.setDate(d.getDate() - offset);
     const date = westernYmd(d);

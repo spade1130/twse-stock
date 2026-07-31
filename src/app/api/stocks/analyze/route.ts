@@ -25,9 +25,9 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const HISTORY_MONTHS = 4;
-const MIN_HISTORY_BARS = 60;
-const MIN_HISTORY_CLOSES = 60;
-const MIN_HISTORY_SPAN_DAYS = 65;
+const MIN_HISTORY_BARS = 55;
+const MIN_HISTORY_CLOSES = 55;
+const MIN_HISTORY_SPAN_DAYS = 60;
 
 function hasStablePotentialHistory(
   history: DailyBar[],
@@ -41,8 +41,10 @@ function hasStablePotentialHistory(
   const oldest = history[0]?.date;
   if (!oldest) return false;
 
-  const cutoff = new Date(tradeDateISO);
-  cutoff.setDate(cutoff.getDate() - MIN_HISTORY_SPAN_DAYS);
+  const [y, m, d] = tradeDateISO.split("-").map((v) => parseInt(v, 10));
+  if (!y || !m || !d) return history.length >= MIN_HISTORY_BARS;
+  const cutoff = new Date(Date.UTC(y, m - 1, d));
+  cutoff.setUTCDate(cutoff.getUTCDate() - MIN_HISTORY_SPAN_DAYS);
   const cutoffISO = cutoff.toISOString().slice(0, 10);
 
   return oldest <= cutoffISO;

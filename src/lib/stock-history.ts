@@ -2,9 +2,10 @@ import type { Market } from "@/types/stock";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-const HISTORY_FETCH_RETRIES = 2;
-const HISTORY_FETCH_RETRY_MS = 120;
+const HISTORY_FETCH_RETRIES = 3;
+const HISTORY_FETCH_RETRY_MS = 250;
 const HISTORY_CACHE_TTL_MS = 60 * 60 * 1000;
+const MONTH_FETCH_GAP_MS = 80;
 
 export interface DailyBar {
   date: string;
@@ -111,10 +112,12 @@ async function fetchTpexMonth(
 
 function monthOffsets(base: Date, count: number): Date[] {
   const months: Date[] = [];
+  // Always use day=1 so month rollback never overflows
+  // (e.g. Jul 31 -> Jun 31 would otherwise become Jul 1).
+  const year = base.getFullYear();
+  const month = base.getMonth();
   for (let i = 0; i < count; i++) {
-    const d = new Date(base);
-    d.setMonth(d.getMonth() - i);
-    months.push(d);
+    months.push(new Date(year, month - i, 1));
   }
   return months;
 }
@@ -138,8 +141,12 @@ async function fetchMonthWithRetry(
   let lastResult: DailyBar[] = [];
 
   for (let attempt = 0; attempt < HISTORY_FETCH_RETRIES; attempt++) {
-    lastResult = await fetcher();
-    if (lastResult.length > 0) return lastResult;
+    try {
+      lastResult = await fetcher();
+      if (lastResult.length > 0) return lastResult;
+    } catch {
+      lastResult = [];
+    }
     if (attempt < HISTORY_FETCH_RETRIES - 1) {
       await delay(HISTORY_FETCH_RETRY_MS * (attempt + 1));
     }
@@ -153,41 +160,70 @@ function historyCacheKey(code: string, market: Market, months: number): string {
   return `${day}|${market}|${code}|${months}`;
 }
 
+/** Fetch months sequentially to avoid TWSE rate-limit bursts. */
+async function fetchMonthsSequentially(
+  code: string,
+  market: Market,
+  monthDates: Date[],
+): Promise<DailyBar[]> {
+  const merged = new Map<string, DailyBar>();
+
+  for (let i = 0; i < monthDates.length; i++) {
+    const d = monthDates[i];
+    const bars =
+      market === "tse"
+        ? await fetchMonthWithRetry(() => fetchTwseMonth(code, toTwseDate(d)))
+        : await fetchMonthWithRetry(() =>
+            fetchTpexMonth(code, toTpexRocMonth(d)),
+          );
+
+    for (const bar of bars) {
+      merged.set(bar.date, bar);
+    }
+
+    if (i < monthDates.length - 1) {
+      await delay(MONTH_FETCH_GAP_MS);
+    }
+  }
+
+  return sortBars(Array.from(merged.values()));
+}
+
 export async function fetchStockHistory(
   code: string,
   market: Market,
   months = 4,
+  options?: { forceRefresh?: boolean },
 ): Promise<DailyBar[]> {
   const key = historyCacheKey(code, market, months);
   const cached = historyCache.get(key);
-  if (cached && cached.expiresAt > Date.now() && cached.bars.length > 0) {
+  if (
+    !options?.forceRefresh &&
+    cached &&
+    cached.expiresAt > Date.now() &&
+    cached.bars.length >= 45
+  ) {
     return cached.bars;
   }
 
   const now = new Date();
   const monthDates = monthOffsets(now, months);
-  const chunks = await Promise.all(
-    monthDates.map((d) => {
-      if (market === "tse") {
-        return fetchMonthWithRetry(() => fetchTwseMonth(code, toTwseDate(d)));
-      }
-      return fetchMonthWithRetry(() => fetchTpexMonth(code, toTpexRocMonth(d)));
-    }),
-  );
+  let bars = await fetchMonthsSequentially(code, market, monthDates);
 
-  const merged = new Map<string, DailyBar>();
-  for (const bars of chunks) {
-    for (const bar of bars) {
-      merged.set(bar.date, bar);
-    }
+  // One full retry if the first pass looks truncated (likely rate-limited).
+  if (bars.length < 45) {
+    await delay(450);
+    bars = await fetchMonthsSequentially(code, market, monthDates);
   }
 
-  const bars = sortBars(Array.from(merged.values()));
-  if (bars.length > 0) {
+  // Only cache sufficiently complete histories so partial failures aren't sticky.
+  if (bars.length >= 45) {
     historyCache.set(key, {
       expiresAt: Date.now() + HISTORY_CACHE_TTL_MS,
       bars,
     });
+  } else {
+    historyCache.delete(key);
   }
   return bars;
 }

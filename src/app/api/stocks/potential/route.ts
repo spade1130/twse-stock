@@ -18,13 +18,14 @@ import type { DailyBar } from "@/lib/stock-history";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Keep the work small enough for Vercel serverless timeouts.
-const MAX_HISTORY_CANDIDATES = 40;
+// Keep the work small enough for Vercel serverless timeouts,
+// and avoid TWSE history rate-limits that wipe out all candidates.
+const MAX_HISTORY_CANDIDATES = 36;
 const HISTORY_MONTHS = 4;
-const HISTORY_CONCURRENCY = 5;
-const MIN_HISTORY_BARS = 60;
-const MIN_HISTORY_CLOSES = 60;
-const MIN_HISTORY_SPAN_DAYS = 65;
+const HISTORY_CONCURRENCY = 3;
+const MIN_HISTORY_BARS = 55;
+const MIN_HISTORY_CLOSES = 55;
+const MIN_HISTORY_SPAN_DAYS = 60;
 const MARGIN_CANDIDATE_POOL = 60;
 const CHIP_CANDIDATE_POOL = 50;
 const VOLUME_FALLBACK_POOL = 30;
@@ -82,8 +83,11 @@ function hasStablePotentialHistory(
   const oldest = history[0]?.date;
   if (!oldest) return false;
 
-  const cutoff = new Date(tradeDateISO);
-  cutoff.setDate(cutoff.getDate() - MIN_HISTORY_SPAN_DAYS);
+  // Parse as Taipei calendar day to avoid UTC off-by-one on cutoff.
+  const [y, m, d] = tradeDateISO.split("-").map((v) => parseInt(v, 10));
+  if (!y || !m || !d) return history.length >= MIN_HISTORY_BARS;
+  const cutoff = new Date(Date.UTC(y, m - 1, d));
+  cutoff.setUTCDate(cutoff.getUTCDate() - MIN_HISTORY_SPAN_DAYS);
   const cutoffISO = cutoff.toISOString().slice(0, 10);
 
   return oldest <= cutoffISO;
@@ -453,12 +457,22 @@ export async function GET(request: NextRequest) {
         candidates,
         HISTORY_CONCURRENCY,
         async (stock): Promise<PotentialStock | null> => {
-          const history = await fetchStockHistory(
+          let history = await fetchStockHistory(
             stock.code,
             stock.market,
             HISTORY_MONTHS,
           );
-          if (!hasStablePotentialHistory(history, tradeDateISO)) return null;
+          if (!hasStablePotentialHistory(history, tradeDateISO)) {
+            // Rate-limit recovery: wait briefly and refetch once (bypass cache).
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            history = await fetchStockHistory(
+              stock.code,
+              stock.market,
+              HISTORY_MONTHS,
+              { forceRefresh: true },
+            );
+            if (!hasStablePotentialHistory(history, tradeDateISO)) return null;
+          }
 
           const gain60dPct = calcGain60dPct(stock.price, history, tradeDateISO);
 

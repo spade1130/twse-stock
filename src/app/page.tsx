@@ -45,56 +45,30 @@ export default function Home() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
-    try {
-      const params = new URLSearchParams({
-        minScore: String(minScore),
-      });
-      if (search) params.set("q", search);
 
+    const params = new URLSearchParams({
+      minScore: String(minScore),
+    });
+    if (search) params.set("q", search);
+
+    const requestOnce = async (): Promise<LimitUpResponse> => {
       const res = await fetch(`/api/stocks/limit-up?${params}`, {
-        cache: "no-store",
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error ?? "資料載入失敗");
-      }
-      const json: LimitUpResponse = await res.json();
-      setLimitData(json);
-      setLimitHasSearched(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "未知錯誤");
-    } finally {
-      setLoading(false);
-    }
-  }, [search, minScore]);
-
-  const fetchPotential = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const params = new URLSearchParams({
-        minScore: String(potentialMinScore),
-      });
-      if (search) params.set("q", search);
-
-      const res = await fetch(`/api/stocks/potential?${params.toString()}`, {
         cache: "no-store",
         headers: { "Cache-Control": "no-cache" },
       });
 
       const text = await res.text();
-      let json: PotentialResponse | { error?: string } | null = null;
+      let json: LimitUpResponse | { error?: string } | null = null;
       try {
-        json = text ? (JSON.parse(text) as PotentialResponse | { error?: string }) : null;
+        json = text
+          ? (JSON.parse(text) as LimitUpResponse | { error?: string })
+          : null;
       } catch {
         if (
           text.includes("FUNCTION_INVOCATION_TIMEOUT") ||
           text.includes("An error occurred with your deployment")
         ) {
-          throw new Error(
-            "伺服器處理逾時，請稍後再試一次（篩選請求較重，偶發會超時）",
-          );
+          throw new Error("TIMEOUT");
         }
         throw new Error("伺服器回應格式異常，請稍後再試");
       }
@@ -105,10 +79,95 @@ export default function Home() {
         );
       }
 
-      setPotentialData(json as PotentialResponse);
+      return json as LimitUpResponse;
+    };
+
+    try {
+      let json: LimitUpResponse;
+      try {
+        json = await requestOnce();
+      } catch (firstError) {
+        const isTimeout =
+          firstError instanceof Error && firstError.message === "TIMEOUT";
+        if (!isTimeout) throw firstError;
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        json = await requestOnce();
+      }
+
+      setLimitData(json);
+      setLimitHasSearched(true);
+    } catch (e) {
+      if (e instanceof Error && e.message === "TIMEOUT") {
+        setError("伺服器處理逾時，請稍後再試一次（篩選請求較重，偶發會超時）");
+      } else {
+        setError(e instanceof Error ? e.message : "未知錯誤");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [search, minScore]);
+
+  const fetchPotential = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    const params = new URLSearchParams({
+      minScore: String(potentialMinScore),
+    });
+    if (search) params.set("q", search);
+
+    const requestOnce = async (): Promise<PotentialResponse> => {
+      const res = await fetch(`/api/stocks/potential?${params.toString()}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+
+      const text = await res.text();
+      let json: PotentialResponse | { error?: string } | null = null;
+      try {
+        json = text
+          ? (JSON.parse(text) as PotentialResponse | { error?: string })
+          : null;
+      } catch {
+        if (
+          text.includes("FUNCTION_INVOCATION_TIMEOUT") ||
+          text.includes("An error occurred with your deployment")
+        ) {
+          throw new Error("TIMEOUT");
+        }
+        throw new Error("伺服器回應格式異常，請稍後再試");
+      }
+
+      if (!res.ok) {
+        throw new Error(
+          (json && "error" in json && json.error) || "資料載入失敗",
+        );
+      }
+
+      return json as PotentialResponse;
+    };
+
+    try {
+      let json: PotentialResponse;
+      try {
+        json = await requestOnce();
+      } catch (firstError) {
+        // Cold start / cache miss can occasionally time out; retry once.
+        const isTimeout =
+          firstError instanceof Error && firstError.message === "TIMEOUT";
+        if (!isTimeout) throw firstError;
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        json = await requestOnce();
+      }
+
+      setPotentialData(json);
       setPotentialHasSearched(true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "未知錯誤");
+      if (e instanceof Error && e.message === "TIMEOUT") {
+        setError("伺服器處理逾時，請稍後再試一次（篩選請求較重，偶發會超時）");
+      } else {
+        setError(e instanceof Error ? e.message : "未知錯誤");
+      }
     } finally {
       setLoading(false);
     }

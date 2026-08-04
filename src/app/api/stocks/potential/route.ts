@@ -18,20 +18,24 @@ import type { DailyBar } from "@/lib/stock-history";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Keep the work small enough for Vercel serverless timeouts,
-// and avoid TWSE history rate-limits that wipe out all candidates.
-const MAX_HISTORY_CANDIDATES = 36;
+// Keep the work small enough for Vercel serverless timeouts (~60s).
+// Prefer Yahoo fast history; fall back to TWSE only when needed.
+const MAX_HISTORY_CANDIDATES = 24;
 const HISTORY_MONTHS = 4;
-const HISTORY_CONCURRENCY = 3;
-const MIN_HISTORY_BARS = 55;
-const MIN_HISTORY_CLOSES = 55;
-const MIN_HISTORY_SPAN_DAYS = 60;
-const MARGIN_CANDIDATE_POOL = 60;
-const CHIP_CANDIDATE_POOL = 50;
-const VOLUME_FALLBACK_POOL = 30;
-const TDCC_PREFILTER_POOL = 150;
+const HISTORY_CONCURRENCY = 4;
+const RECOVERY_CANDIDATES = 8;
+const MIN_HISTORY_BARS = 50;
+const MIN_HISTORY_CLOSES = 50;
+const MIN_HISTORY_SPAN_DAYS = 55;
+const SOFT_MIN_HISTORY_BARS = 40;
+const MARGIN_CANDIDATE_POOL = 50;
+const CHIP_CANDIDATE_POOL = 40;
+const VOLUME_FALLBACK_POOL = 24;
+const TDCC_PREFILTER_POOL = 120;
 const DEFAULT_MIN_SCORE = 0;
 const OPEN_MARKET_CACHE_MS = 2 * 60 * 1000;
+/** Leave headroom under Vercel maxDuration=60. */
+const WORK_BUDGET_MS = 48_000;
 
 interface PotentialCacheEntry {
   expiresAt: number;
@@ -74,20 +78,22 @@ function toTradeDateISO(raw: string): string {
 function hasStablePotentialHistory(
   history: DailyBar[],
   tradeDateISO: string,
+  minBars = MIN_HISTORY_BARS,
+  minSpanDays = MIN_HISTORY_SPAN_DAYS,
 ): boolean {
-  if (history.length < MIN_HISTORY_BARS) return false;
+  if (history.length < minBars) return false;
 
   const validCloses = history.filter((bar) => bar.close > 0).length;
-  if (validCloses < MIN_HISTORY_CLOSES) return false;
+  if (validCloses < Math.min(minBars, MIN_HISTORY_CLOSES)) return false;
 
   const oldest = history[0]?.date;
   if (!oldest) return false;
 
   // Parse as Taipei calendar day to avoid UTC off-by-one on cutoff.
   const [y, m, d] = tradeDateISO.split("-").map((v) => parseInt(v, 10));
-  if (!y || !m || !d) return history.length >= MIN_HISTORY_BARS;
+  if (!y || !m || !d) return history.length >= minBars;
   const cutoff = new Date(Date.UTC(y, m - 1, d));
-  cutoff.setUTCDate(cutoff.getUTCDate() - MIN_HISTORY_SPAN_DAYS);
+  cutoff.setUTCDate(cutoff.getUTCDate() - minSpanDays);
   const cutoffISO = cutoff.toISOString().slice(0, 10);
 
   return oldest <= cutoffISO;
@@ -347,30 +353,148 @@ function buildTdccPrefilterPool(
   return Array.from(pool.values());
 }
 
-async function mapLimit<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, idx: number) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let idx = 0;
-  const runners = new Array(Math.min(concurrency, items.length))
-    .fill(0)
-    .map(async () => {
-      while (idx < items.length) {
-        const current = idx++;
-        results[current] = await worker(items[current], current);
-      }
-    });
-  await Promise.all(runners);
-  return results;
-}
-
 function sortByMatchScore(a: PotentialStock, b: PotentialStock): number {
   if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
   const aPassed = a.conditions.filter((c) => c.passed).length;
   const bPassed = b.conditions.filter((c) => c.passed).length;
   return bPassed - aPassed;
+}
+
+async function analyzeCandidate(params: {
+  stock: StockInfo;
+  tradeDateISO: string;
+  tdcc: Awaited<ReturnType<typeof fetchTdccChipMetricsForCodesWithComparison>>;
+  margins: Awaited<ReturnType<typeof fetchLatestMargins>>;
+  q: string;
+  softHistory?: boolean;
+  forceRefresh?: boolean;
+  allowFullRetry?: boolean;
+}): Promise<PotentialStock | null> {
+  const {
+    stock,
+    tradeDateISO,
+    tdcc,
+    margins,
+    q,
+    softHistory = false,
+    forceRefresh = false,
+    allowFullRetry = false,
+  } = params;
+
+  const minBars = softHistory ? SOFT_MIN_HISTORY_BARS : MIN_HISTORY_BARS;
+  const minSpan = softHistory ? 45 : MIN_HISTORY_SPAN_DAYS;
+
+  const history = await fetchStockHistory(
+    stock.code,
+    stock.market,
+    HISTORY_MONTHS,
+    {
+      forceRefresh,
+      allowFullRetry,
+      preferFastSource: true,
+      minBarsToCache: minBars,
+    },
+  );
+
+  if (!hasStablePotentialHistory(history, tradeDateISO, minBars, minSpan)) {
+    return null;
+  }
+
+  const gain60dPct = calcGain60dPct(stock.price, history, tradeDateISO);
+  const chip = tdcc.latest.get(stock.code) ?? null;
+  const chipPrev = tdcc.previous.get(stock.code) ?? null;
+  const marginCurrent = margins.current.get(stock.code) ?? 0;
+  const marginPrevious = margins.previous.get(stock.code) ?? 0;
+
+  const result = analyzePotentialStock({
+    code: stock.code,
+    market: stock.market,
+    name: stock.name,
+    todays: {
+      price: stock.price,
+      open: stock.open,
+      high: stock.high,
+      volume: stock.volume,
+    },
+    history,
+    gain60dPct,
+    chip,
+    chipPrev,
+    marginCurrent,
+    marginPrevious,
+  });
+
+  if (
+    q &&
+    !(
+      stock.code.toLowerCase().includes(q) ||
+      stock.name.toLowerCase().includes(q) ||
+      result.signals.some((s) => s.toLowerCase().includes(q))
+    )
+  ) {
+    return null;
+  }
+
+  return result;
+}
+
+function findSameDayFallback(
+  tradeDate: string,
+  q: string,
+  minScore: number,
+): PotentialResponse | null {
+  for (const entry of potentialResponseCache.values()) {
+    if (
+      entry.response.tradeDate === tradeDate &&
+      entry.response.stocks.length > 0
+    ) {
+      const filtered = entry.response.stocks
+        .filter((s) => s.matchScore >= minScore)
+        .filter((s) => {
+          if (!q) return true;
+          return (
+            s.code.toLowerCase().includes(q) ||
+            s.name.toLowerCase().includes(q) ||
+            s.signals.some((sig) => sig.toLowerCase().includes(q))
+          );
+        });
+      if (filtered.length === 0) continue;
+      return {
+        ...clonePotentialResponse(entry.response),
+        stocks: filtered,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+  return null;
+}
+
+async function mapLimitWithDeadline<T, R>(
+  items: T[],
+  concurrency: number,
+  deadlineMs: number,
+  worker: (item: T, idx: number) => Promise<R | null>,
+): Promise<Array<R | null>> {
+  const results: Array<R | null> = new Array(items.length).fill(null);
+  let idx = 0;
+  let stopped = false;
+
+  const runners = new Array(Math.min(concurrency, items.length))
+    .fill(0)
+    .map(async () => {
+      while (!stopped) {
+        if (Date.now() >= deadlineMs) {
+          stopped = true;
+          break;
+        }
+        const current = idx++;
+        if (current >= items.length) break;
+        results[current] = await worker(items[current], current);
+      }
+    });
+
+  await Promise.all(runners);
+  return results;
 }
 
 export async function GET(request: NextRequest) {
@@ -452,80 +576,78 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const stocks = (
-      await mapLimit(
+    const startedAt = Date.now();
+    const deadlineMs = startedAt + WORK_BUDGET_MS;
+
+    let stocks = (
+      await mapLimitWithDeadline(
         candidates,
         HISTORY_CONCURRENCY,
-        async (stock): Promise<PotentialStock | null> => {
-          let history = await fetchStockHistory(
-            stock.code,
-            stock.market,
-            HISTORY_MONTHS,
-          );
-          if (!hasStablePotentialHistory(history, tradeDateISO)) {
-            // Rate-limit recovery: wait briefly and refetch once (bypass cache).
-            await new Promise((resolve) => setTimeout(resolve, 350));
-            history = await fetchStockHistory(
-              stock.code,
-              stock.market,
-              HISTORY_MONTHS,
-              { forceRefresh: true },
-            );
-            if (!hasStablePotentialHistory(history, tradeDateISO)) return null;
-          }
-
-          const gain60dPct = calcGain60dPct(stock.price, history, tradeDateISO);
-
-          const chip = tdcc.latest.get(stock.code) ?? null;
-          const chipPrev = tdcc.previous.get(stock.code) ?? null;
-
-          const marginCurrent = margins.current.get(stock.code) ?? 0;
-          const marginPrevious = margins.previous.get(stock.code) ?? 0;
-
-          const result = analyzePotentialStock({
-            code: stock.code,
-            market: stock.market,
-            name: stock.name,
-            todays: {
-              price: stock.price,
-              open: stock.open,
-              high: stock.high,
-              volume: stock.volume,
-            },
-            history,
-            gain60dPct,
-            chip,
-            chipPrev,
-            marginCurrent,
-            marginPrevious,
-          });
-
-          if (
-            q &&
-            !(
-              stock.code.toLowerCase().includes(q) ||
-              stock.name.toLowerCase().includes(q) ||
-              result.signals.some((s) => s.toLowerCase().includes(q))
-            )
-          ) {
-            return null;
-          }
-
-          return result;
-        },
+        deadlineMs,
+        async (stock): Promise<PotentialStock | null> =>
+          analyzeCandidate({
+            stock,
+            tradeDateISO,
+            tdcc,
+            margins,
+            q,
+            allowFullRetry: false,
+          }),
       )
     ).filter((s): s is PotentialStock => s !== null);
 
-    const results = stocks
+    // Recovery wave only if first pass emptied out AND we still have budget.
+    const remainingMs = deadlineMs - Date.now();
+    if (stocks.length === 0 && candidates.length > 0 && remainingMs > 12_000) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const recoveryPool = [...candidates]
+        .sort((a, b) => b.volume - a.volume)
+        .slice(0, RECOVERY_CANDIDATES);
+
+      stocks = (
+        await mapLimitWithDeadline(
+          recoveryPool,
+          2,
+          deadlineMs,
+          async (stock): Promise<PotentialStock | null> =>
+            analyzeCandidate({
+              stock,
+              tradeDateISO,
+              tdcc,
+              margins,
+              q,
+              softHistory: true,
+              forceRefresh: true,
+              allowFullRetry: true,
+            }),
+        )
+      ).filter((s): s is PotentialStock => s !== null);
+    }
+
+    let results = stocks
       .filter((s) => s.matchScore >= minScore)
       .sort(sortByMatchScore);
+
+    // Same-day fallback: if this run still failed, reuse the last good snapshot.
+    if (results.length === 0) {
+      const fallback = findSameDayFallback(tradeDate, q, minScore);
+      if (fallback) {
+        return NextResponse.json(fallback, {
+          headers: {
+            "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+            Pragma: "no-cache",
+            Expires: "0",
+          },
+        });
+      }
+    }
 
     const fullCount = results.filter((s) =>
       s.conditions.every((c) => c.passed),
     ).length;
     const matchMode = fullCount > 0 ? "full" : "partial";
 
-    if (results.length > 0) {
+    if (results.length > 0 && Date.now() < deadlineMs - 3_000) {
       const latestQuotes = await fetchStockQuotes(
         results.map((s) => ({ code: s.code, market: s.market })),
       );

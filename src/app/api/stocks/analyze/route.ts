@@ -25,9 +25,9 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const HISTORY_MONTHS = 4;
-const MIN_HISTORY_BARS = 55;
-const MIN_HISTORY_CLOSES = 55;
-const MIN_HISTORY_SPAN_DAYS = 60;
+const MIN_HISTORY_BARS = 50;
+const MIN_HISTORY_CLOSES = 50;
+const MIN_HISTORY_SPAN_DAYS = 55;
 
 function hasStablePotentialHistory(
   history: DailyBar[],
@@ -211,6 +211,7 @@ export async function GET(request: NextRequest) {
       stock.code,
       stock.market,
       HISTORY_MONTHS,
+      { preferFastSource: true, allowFullRetry: true, minBarsToCache: MIN_HISTORY_BARS },
     );
     const tradeDateISO = new Date().toISOString().slice(0, 10);
 

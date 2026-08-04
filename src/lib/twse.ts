@@ -453,13 +453,15 @@ export async function getInstitutionalData(): Promise<
     for (const row of twseToday) data.set(row.code, row);
   } else {
     // Today may be empty before T86 publishes (or on weekends/holidays).
-    const fallbackDates: string[] = [];
-    for (let i = 1; i <= 7; i++) {
-      const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
-      fallbackDates.push(westernYmd(d));
-    }
-    for (const date of [...new Set(fallbackDates)]) {
-      const rows = await fetchTwseInstitutional(date);
+    // Probe a few recent weekdays in parallel instead of serially.
+    const fallbackDates = Array.from({ length: 5 }, (_, i) => {
+      const d = new Date(Date.now() - (i + 1) * 24 * 60 * 60 * 1000);
+      return westernYmd(d);
+    });
+    const fallbackResults = await Promise.all(
+      fallbackDates.map((date) => fetchTwseInstitutional(date)),
+    );
+    for (const rows of fallbackResults) {
       if (rows.length > 0) {
         for (const row of rows) data.set(row.code, row);
         break;
@@ -498,11 +500,22 @@ async function fetchStockBatch(
     .filter((s): s is StockInfo => s !== null);
 }
 
-export async function fetchLatestQuotes(): Promise<{
+export async function fetchLatestQuotes(options?: {
+  /** Max concurrent MIS batch requests. Default 4. */
+  concurrency?: number;
+  /** Stocks per MIS request. Default 100. */
+  batchSize?: number;
+  /** Soft deadline; return what we have / fall back to daily. */
+  deadlineMs?: number;
+}): Promise<{
   stocks: StockInfo[];
   tradeDate: string;
   dataSource: "realtime" | "daily";
 }> {
+  const concurrency = options?.concurrency ?? 4;
+  const batchSize = options?.batchSize ?? 100;
+  const deadlineMs = options?.deadlineMs ?? Date.now() + 45_000;
+
   const list = await getStockList();
   if (list.length === 0) {
     const daily = await fetchDailyQuotes();
@@ -513,18 +526,27 @@ export async function fetchLatestQuotes(): Promise<{
     };
   }
 
-  const batches = chunk(list, 80);
-  const results: StockInfo[] = [];
-  let tradeDate = rocDate();
+  const batches = chunk(list, batchSize);
+  const results: StockInfo[] = new Array(batches.length);
+  let nextIdx = 0;
 
-  for (const batch of batches) {
-    const quotes = await fetchStockBatch(batch);
-    results.push(...quotes);
-    await delay(250);
-  }
+  const workers = new Array(Math.min(concurrency, batches.length))
+    .fill(0)
+    .map(async () => {
+      while (true) {
+        if (Date.now() >= deadlineMs) break;
+        const current = nextIdx++;
+        if (current >= batches.length) break;
+        results[current] = await fetchStockBatch(batches[current]);
+      }
+    });
+
+  await Promise.all(workers);
+
+  const stocks = results.flat().filter(Boolean);
 
   // 若即時報價幾乎沒取到，退回收盤資料
-  if (results.length < Math.min(50, list.length / 10)) {
+  if (stocks.length < Math.min(50, list.length / 10)) {
     const daily = await fetchDailyQuotes();
     return {
       stocks: daily,
@@ -533,6 +555,7 @@ export async function fetchLatestQuotes(): Promise<{
     };
   }
 
+  let tradeDate = rocDate();
   const probe = await fetchJson<{
     msgArray?: { d?: string }[];
   }>(`${MIS_BASE}?ex_ch=tse_2330.tw&json=1&delay=0&_=${Date.now()}`);
@@ -541,7 +564,7 @@ export async function fetchLatestQuotes(): Promise<{
   }
 
   return {
-    stocks: results,
+    stocks,
     tradeDate,
     dataSource: "realtime",
   };

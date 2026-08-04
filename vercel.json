@@ -5,6 +5,9 @@
     },
     "src/app/api/stocks/analyze/route.ts": {
       "maxDuration": 60
+    },
+    "src/app/api/stocks/limit-up/route.ts": {
+      "maxDuration": 60
     }
   }
 }

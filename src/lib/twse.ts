@@ -527,7 +527,7 @@ export async function fetchLatestQuotes(options?: {
   }
 
   const batches = chunk(list, batchSize);
-  const results: StockInfo[] = new Array(batches.length);
+  const results: StockInfo[][] = new Array(batches.length);
   let nextIdx = 0;
 
   const workers = new Array(Math.min(concurrency, batches.length))

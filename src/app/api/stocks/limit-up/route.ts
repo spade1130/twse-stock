@@ -259,7 +259,12 @@ export async function GET(request: NextRequest) {
       minScore,
     });
 
-    const analyzed = latest.stocks.map((stock) =>
+    // Match potential: only scan stocks with a valid price and volume.
+    const validStocks = latest.stocks.filter(
+      (s) => s.price > 0 && s.volume > 0,
+    );
+
+    const analyzed = validStocks.map((stock) =>
       analyzeMainForce(
         stock,
         volumes.get(stock.code) ?? 0,

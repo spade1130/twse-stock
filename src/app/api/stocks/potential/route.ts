@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   fetchDailyQuotes,
+  fetchLatestQuotes,
   fetchStockQuotes,
   getMarketStatus,
 } from "@/lib/twse";
@@ -497,6 +498,33 @@ async function mapLimitWithDeadline<T, R>(
   return results;
 }
 
+async function loadQuoteUniverse(params: {
+  marketStatus: "open" | "closed" | "unknown";
+  deadlineMs: number;
+}): Promise<{
+  stocks: StockInfo[];
+  tradeDate: string;
+  dataSource: "realtime" | "daily";
+}> {
+  // Match limit-up: use MIS realtime while the market is open; otherwise
+  // daily close is faster and sufficient after hours / weekends.
+  if (params.marketStatus !== "open") {
+    const daily = await fetchDailyQuotes();
+    const taipei = getTaipeiDateTime();
+    return {
+      stocks: daily,
+      tradeDate: `${taipei.year}/${String(taipei.month).padStart(2, "0")}/${String(taipei.day).padStart(2, "0")}`,
+      dataSource: "daily",
+    };
+  }
+
+  return fetchLatestQuotes({
+    concurrency: 6,
+    batchSize: 120,
+    deadlineMs: params.deadlineMs,
+  });
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const q = (searchParams.get("q") ?? "").trim().toLowerCase();
@@ -506,27 +534,24 @@ export async function GET(request: NextRequest) {
     : DEFAULT_MIN_SCORE;
 
   try {
+    const startedAt = Date.now();
+    const deadlineMs = startedAt + WORK_BUDGET_MS;
     const marketStatus = getMarketStatus();
-    const [dailyStocks, margins] = await Promise.all([
-      fetchDailyQuotes(),
-      fetchLatestMargins(),
-    ]);
+    const taipeiNow = getTaipeiDateTime();
+    const provisionalTradeDate = `${taipeiNow.year}/${String(taipeiNow.month).padStart(2, "0")}/${String(taipeiNow.day).padStart(2, "0")}`;
+    const expectedSource = marketStatus === "open" ? "realtime" : "daily";
 
-    const today = new Date();
-    const tradeDate = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
-    const tradeDateISO = tradeDate.replace(/\//g, "-");
-    const dataSource = "daily" as const;
-
-    const cacheKey = buildPotentialCacheKey({
-      tradeDate,
-      dataSource,
+    const provisionalKey = buildPotentialCacheKey({
+      tradeDate: provisionalTradeDate,
+      dataSource: expectedSource,
       marketStatus,
       q,
       minScore,
     });
-    const cached = potentialResponseCache.get(cacheKey);
+
+    const cached = potentialResponseCache.get(provisionalKey);
     if (cached && cached.response.stocks.length === 0) {
-      potentialResponseCache.delete(cacheKey);
+      potentialResponseCache.delete(provisionalKey);
     } else if (cached && cached.expiresAt > Date.now()) {
       return NextResponse.json(clonePotentialResponse(cached.response), {
         headers: {
@@ -537,8 +562,25 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const validStocks = dailyStocks.filter(
-      (s) => s.price > 0 && s.volume > 0 && s.market === "tse",
+    const [latest, margins] = await Promise.all([
+      loadQuoteUniverse({ marketStatus, deadlineMs }),
+      fetchLatestMargins(),
+    ]);
+
+    const tradeDate = formatTradeDateISO(latest.tradeDate);
+    const tradeDateISO = toTradeDateISO(tradeDate);
+    const dataSource = latest.dataSource;
+
+    const cacheKey = buildPotentialCacheKey({
+      tradeDate,
+      dataSource,
+      marketStatus,
+      q,
+      minScore,
+    });
+
+    const validStocks = latest.stocks.filter(
+      (s) => s.price > 0 && s.volume > 0,
     );
 
     // Only parse TDCC for a pre-filtered pool, not the entire market.
@@ -575,9 +617,6 @@ export async function GET(request: NextRequest) {
         }
       }
     }
-
-    const startedAt = Date.now();
-    const deadlineMs = startedAt + WORK_BUDGET_MS;
 
     let stocks = (
       await mapLimitWithDeadline(
@@ -647,7 +686,12 @@ export async function GET(request: NextRequest) {
     ).length;
     const matchMode = fullCount > 0 ? "full" : "partial";
 
-    if (results.length > 0 && Date.now() < deadlineMs - 3_000) {
+    // When the universe came from daily close, refresh matched rows with MIS.
+    if (
+      dataSource === "daily" &&
+      results.length > 0 &&
+      Date.now() < deadlineMs - 3_000
+    ) {
       const latestQuotes = await fetchStockQuotes(
         results.map((s) => ({ code: s.code, market: s.market })),
       );
@@ -679,14 +723,17 @@ export async function GET(request: NextRequest) {
     };
 
     if (response.stocks.length > 0) {
-      potentialResponseCache.set(cacheKey, {
+      const entry = {
         expiresAt:
           Date.now() +
           (marketStatus === "open"
             ? OPEN_MARKET_CACHE_MS
             : Math.max(1, nextMarketOpenTimestamp() - Date.now())),
         response: clonePotentialResponse(response),
-      });
+      };
+      potentialResponseCache.set(cacheKey, entry);
+      // Also index under provisional key so the next click hits cache immediately.
+      potentialResponseCache.set(provisionalKey, entry);
     }
 
     return NextResponse.json(response, {

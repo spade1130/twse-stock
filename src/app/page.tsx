@@ -355,7 +355,6 @@ export default function Home() {
             stocks={potentialData?.stocks ?? []}
             loading={loading}
             hasSearched={potentialHasSearched}
-            matchMode={potentialData?.matchMode}
           />
         )}
 

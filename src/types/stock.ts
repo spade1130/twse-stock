@@ -122,3 +122,82 @@ export interface StockAnalyzeResponse {
   advice: StockAdvice;
   candidates?: StockCandidate[];
 }
+
+export type GranvilleRuleId =
+  | "buy1"
+  | "buy2"
+  | "buy3"
+  | "buy4"
+  | "sell1"
+  | "sell2"
+  | "sell3"
+  | "sell4";
+
+export type GranvilleFocusBuy = "buy2" | "buy3" | "both" | null;
+
+export type MaSlope = "rising" | "flat" | "falling";
+
+export interface GranvilleRuleResult {
+  id: GranvilleRuleId;
+  side: "buy" | "sell";
+  label: string;
+  title: string;
+  matched: boolean;
+  highlighted: boolean;
+  detail: string;
+}
+
+export interface GranvilleIndicators {
+  volumeAvg20: number;
+  volumeRatio20: number;
+  volumeTrend: "shrinking" | "expanding" | "neutral";
+  volumeNote: string;
+  macdDif: number;
+  macdDea: number;
+  macdHistogram: number;
+  macdPrevHistogram: number;
+  macdSignal: string;
+  k: number;
+  d: number;
+  j: number;
+  kdSignal: string;
+  rsi: number;
+  rsiSignal: string;
+}
+
+export interface GranvilleStock {
+  code: string;
+  name: string;
+  market: Market;
+  price: number;
+  open: number;
+  high: number;
+  low: number;
+  yesterdayClose: number;
+  change: number;
+  changePercent: number;
+  volume: number;
+  updateTime: string;
+  ma20: number;
+  ma20Prev: number;
+  maSlope: MaSlope;
+  bias20: number;
+  gain60d: number;
+  rules: GranvilleRuleResult[];
+  focusBuy: GranvilleFocusBuy;
+  indicators: GranvilleIndicators;
+  advice: StockAdvice;
+  score: number;
+}
+
+export interface GranvilleResponse {
+  updatedAt: string;
+  tradeDate: string;
+  dataSource: "realtime" | "daily";
+  marketStatus: "open" | "closed" | "unknown";
+  totalScanned: number;
+  historyAnalyzed: number;
+  buy2Count: number;
+  buy3Count: number;
+  stocks: GranvilleStock[];
+}

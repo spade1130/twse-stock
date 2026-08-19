@@ -9,14 +9,18 @@ import { PotentialStatsCards } from "@/components/PotentialStatsCards";
 import { PotentialTable } from "@/components/PotentialTable";
 import { AnalyzeSearchBar } from "@/components/AnalyzeSearchBar";
 import { StockAnalyzePanel } from "@/components/StockAnalyzePanel";
+import { GranvilleSearchBar } from "@/components/GranvilleSearchBar";
+import { GranvilleStatsCards } from "@/components/GranvilleStatsCards";
+import { GranvillePanel } from "@/components/GranvillePanel";
 import type {
+  GranvilleResponse,
   LimitUpResponse,
   PotentialResponse,
   StockAnalyzeResponse,
   StockCandidate,
 } from "@/types/stock";
 
-type TabId = "limitUp" | "potential" | "analyze";
+type TabId = "limitUp" | "potential" | "analyze" | "granville";
 
 export default function Home() {
   const [tab, setTab] = useState<TabId>("limitUp");
@@ -31,16 +35,23 @@ export default function Home() {
   const [analyzeCandidates, setAnalyzeCandidates] = useState<
     StockCandidate[] | undefined
   >(undefined);
+  const [granvilleData, setGranvilleData] = useState<GranvilleResponse | null>(
+    null,
+  );
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [analyzeQuery, setAnalyzeQuery] = useState("");
+  const [granvilleQuery, setGranvilleQuery] = useState("");
   const [minScore, setMinScore] = useState(0);
   const [potentialMinScore, setPotentialMinScore] = useState(0);
+  const [granvilleMinScore, setGranvilleMinScore] = useState(0);
   const [limitHasSearched, setLimitHasSearched] = useState(false);
   const [potentialHasSearched, setPotentialHasSearched] = useState(false);
   const [analyzeHasSearched, setAnalyzeHasSearched] = useState(false);
+  const [granvilleHasSearched, setGranvilleHasSearched] = useState(false);
+  const [granvilleSearchedQuery, setGranvilleSearchedQuery] = useState("");
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -224,6 +235,73 @@ export default function Home() {
     }
   }, [analyzeQuery]);
 
+  const fetchGranville = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    const params = new URLSearchParams({
+      minScore: String(granvilleMinScore),
+      _t: String(Date.now()),
+    });
+    if (granvilleQuery.trim()) params.set("q", granvilleQuery.trim());
+
+    const requestOnce = async (): Promise<GranvilleResponse> => {
+      const res = await fetch(`/api/stocks/granville?${params.toString()}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+
+      const text = await res.text();
+      let json: GranvilleResponse | { error?: string } | null = null;
+      try {
+        json = text
+          ? (JSON.parse(text) as GranvilleResponse | { error?: string })
+          : null;
+      } catch {
+        if (
+          text.includes("FUNCTION_INVOCATION_TIMEOUT") ||
+          text.includes("An error occurred with your deployment")
+        ) {
+          throw new Error("TIMEOUT");
+        }
+        throw new Error("伺服器回應格式異常，請稍後再試");
+      }
+
+      if (!res.ok) {
+        throw new Error(
+          (json && "error" in json && json.error) || "資料載入失敗",
+        );
+      }
+
+      return json as GranvilleResponse;
+    };
+
+    try {
+      let json: GranvilleResponse;
+      try {
+        json = await requestOnce();
+      } catch (firstError) {
+        const isTimeout =
+          firstError instanceof Error && firstError.message === "TIMEOUT";
+        if (!isTimeout) throw firstError;
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        json = await requestOnce();
+      }
+
+      setGranvilleData(json);
+      setGranvilleHasSearched(true);
+      setGranvilleSearchedQuery(granvilleQuery.trim());
+    } catch (e) {
+      if (e instanceof Error && e.message === "TIMEOUT") {
+        setError("伺服器處理逾時，請稍後再試一次（篩選請求較重，偶發會超時）");
+      } else {
+        setError(e instanceof Error ? e.message : "未知錯誤");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [granvilleQuery, granvilleMinScore]);
+
   const tabBtn = (id: TabId, label: string) => (
     <button
       type="button"
@@ -266,7 +344,7 @@ export default function Home() {
             <div>
               <h1 className="text-2xl font-bold text-zinc-100">台股股票篩選</h1>
               <p className="text-sm text-zinc-500">
-                漲停篩選、優質潛力股與個股分析建議
+                漲停篩選、優質潛力股、個股分析與葛蘭碧買賣點
               </p>
             </div>
           </div>
@@ -275,6 +353,7 @@ export default function Home() {
             {tabBtn("limitUp", "漲停股篩選")}
             {tabBtn("potential", "優質潛力股")}
             {tabBtn("analyze", "個股分析建議")}
+            {tabBtn("granville", "葛蘭碧買賣點分析")}
           </div>
         </header>
 
@@ -334,6 +413,31 @@ export default function Home() {
               loading={loading}
             />
           )}
+
+          {tab === "granville" && granvilleHasSearched && granvilleData && (
+            <GranvilleStatsCards
+              totalScanned={granvilleData.totalScanned}
+              historyAnalyzed={granvilleData.historyAnalyzed}
+              buy2Count={granvilleData.buy2Count}
+              buy3Count={granvilleData.buy3Count}
+              marketStatus={granvilleData.marketStatus}
+              updatedAt={granvilleData.updatedAt}
+              tradeDate={granvilleData.tradeDate}
+              dataSource={granvilleData.dataSource}
+              loading={loading}
+            />
+          )}
+
+          {tab === "granville" && (
+            <GranvilleSearchBar
+              value={granvilleQuery}
+              onChange={setGranvilleQuery}
+              onSearch={fetchGranville}
+              loading={loading}
+              minScore={granvilleMinScore}
+              onMinScoreChange={setGranvilleMinScore}
+            />
+          )}
         </div>
 
         {error && (
@@ -368,13 +472,22 @@ export default function Home() {
           />
         )}
 
+        {tab === "granville" && (
+          <GranvillePanel
+            stocks={granvilleData?.stocks ?? []}
+            loading={loading}
+            hasSearched={granvilleHasSearched}
+            queried={Boolean(granvilleSearchedQuery)}
+          />
+        )}
+
         <footer className="mt-8 text-center text-xs text-zinc-600">
           <p>
             行情來自證交所 MIS 即時報價（手動篩選時更新）·
             主力分數綜合評估法人、量能與五檔委託
           </p>
           <p className="mt-1">
-            優質潛力股與個股分析使用歷史 K 線、融資餘額與集保籌碼（僅供參考，不構成投資建議）
+            優質潛力股與個股分析使用歷史 K 線、融資餘額與集保籌碼；葛蘭碧法則搭配成交量、MACD、KD、RSI（僅供參考，不構成投資建議）
           </p>
         </footer>
       </div>

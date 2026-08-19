@@ -687,13 +687,10 @@ export function getMarketStatus(): "open" | "closed" | "unknown" {
 
   const morningOpen = 9 * 60;
   const morningClose = 13 * 60 + 30;
-  const afternoonOpen = 14 * 60;
-  const afternoonClose = 14 * 60 + 30;
 
-  if (
-    (time >= morningOpen && time <= morningClose) ||
-    (time >= afternoonOpen && time <= afternoonClose)
-  ) {
+  // UI 的「市場狀態」以一般整股交易時段為準；
+  // 13:30 之後即視為已收盤，避免盤後交易時段仍顯示盤中。
+  if (time >= morningOpen && time <= morningClose) {
     return "open";
   }
   return "closed";
